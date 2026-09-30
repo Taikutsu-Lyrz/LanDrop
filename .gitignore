@@ -1,0 +1,60 @@
+node_modules/
+dist/
+.svelte-kit/
+coverage/
+validation/datasets/
+validation/manifests/
+validation/runs/
+
+src-tauri/target/
+src-tauri/target-check/
+src-tauri/gen/
+src-tauri/.cargo/
+android/.gradle/
+android/.kotlin/
+android/local.properties
+android/app/build/
+android/app/release/
+android/rust/**/target/
+
+.idea/
+.vscode/
+.env
+.env.*
+*.log
+*.tmp
+*.keystore
+*.jks
+android/keystore.properties
+Thumbs.db
+
+# Local tool build outputs
+tools/**/target/
+validation/runs/
+
+# Local Android SDK / emulator install (cloud agent / CI machines)
+.android-sdk/
+
+# Kotlin/Java compiled outputs (avoid staging kotlinc/javac artifacts)
+*.class
+*.kotlin_module
+
+# Local agent configuration, unrelated projects, and generated media
+/.agents/
+/.codex/
+/.aws/
+/Zone/
+/brag-output/
+/skills-lock.json
+
+# Archived source and planning snapshots
+/v1.0.0/
+/ANDROID_TAURI_V2_PLAN.md
+/LAN_DROP_TAURI_RUST_PLAN.md
+
+# Generated Android and local validation output
+/android/build/
+/android/release-out/
+/validation/java-tmp/
+/validation/discovery-tests/
+/validation/repo-reset/

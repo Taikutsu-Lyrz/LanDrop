@@ -1,0 +1,38 @@
+[package]
+name = "landrop-desktop"
+version = "0.1.0"
+description = "LanDrop desktop application"
+authors = ["OpenAI Codex"]
+edition = "2021"
+
+[lib]
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+base64 = "0.22"
+igd-next = { version = "0.17", features = ["aio_tokio"] }
+rcgen = "0.13"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+subtle = "2.6"
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-notification = "2"
+thiserror = "1"
+socket2 = "0.5"
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+uuid = { version = "1", features = ["serde", "v4"] }
+walkdir = "2"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61.3", features = ["Devices_WiFiDirect", "Devices_Enumeration", "Foundation", "Security_Credentials", "Win32_System_WinRT"] }
+ipconfig = "0.3.4"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }

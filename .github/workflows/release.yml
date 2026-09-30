@@ -1,0 +1,418 @@
+# LanDrop release workflow: Windows (Tauri 2 NSIS + MSI + portable zip) + Android (Kotlin Compose).
+#
+# Triggers:
+#   1. Manual dispatch (Actions tab -> "Release" -> Run workflow):
+#        - optional `version` input (e.g. 0.2.0). When provided, every version
+#          source is bumped to exactly that version and committed back to the
+#          branch. When empty, the current package.json version is released
+#          as-is (no files rewritten).
+#   2. Push of a tag matching v* (e.g. v0.2.0): builds and releases that tag
+#      as-is. Version files are NEVER rewritten on tag triggers.
+#
+# Flow:
+#   prepare       -> resolve version, optionally bump+push, create draft release
+#   build-windows -> Tauri NSIS + MSI + portable zip, attached to the release
+#   build-android -> APK (+ signed AAB when signing secrets exist), attached
+#
+# Secrets (all optional, see RELEASE.md):
+#   ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD,
+#   ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD
+#
+# Required permission: contents: write (create/push tags, draft releases,
+# commit version bumps, upload assets). No force-push, no merges.
+
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g. 0.2.0). Empty = release current package.json version without rewriting files.'
+        required: false
+        default: ''
+        type: string
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: landrop-release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+
+jobs:
+  # ---------------------------------------------------------------------------
+  prepare:
+    name: Resolve version & create draft release
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      version_code: ${{ steps.resolve.outputs.version_code }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      commit_sha: ${{ steps.pin.outputs.sha }}
+      bumped: ${{ steps.resolve.outputs.should_bump }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Full history so tags resolve correctly on tag triggers.
+          fetch-depth: 0
+
+      - name: Setup Node (for version parsing)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 'lts/*'
+
+      - name: Resolve version
+        id: resolve
+        run: |
+          INPUT_VERSION="${{ inputs.version }}"
+          if [ -n "$INPUT_VERSION" ]; then
+            # Manual dispatch with an explicit version: bump to exactly this.
+            RAW="$INPUT_VERSION"
+            SHOULD_BUMP="true"
+          elif [ "${{ github.ref_type }}" = "tag" ]; then
+            # Tag push (v*): release that tag as-is, never rewrite files.
+            RAW="${{ github.ref_name }}"
+            SHOULD_BUMP="false"
+          else
+            # Manual dispatch without a version: release current tree as-is.
+            RAW="$(node -p "require('./package.json').version")"
+            SHOULD_BUMP="false"
+          fi
+          # Accept an optional leading 'v' (tags are v0.2.0, versions are 0.2.0).
+          VERSION="${RAW#v}"
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Resolved version '$RAW' is not valid semver (expected e.g. 0.2.0)"
+            exit 1
+          fi
+          MAJOR="${VERSION%%.*}"
+          REST="${VERSION#*.}"
+          MINOR="${REST%%.*}"
+          PATCH="${REST##*.}"
+          VERSION_CODE=$((10#$MAJOR * 10000 + 10#$MINOR * 100 + 10#$PATCH))
+          TAG="v$VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "version_code=$VERSION_CODE" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "should_bump=$SHOULD_BUMP" >> "$GITHUB_OUTPUT"
+          echo "Resolved version=$VERSION version_code=$VERSION_CODE tag=$TAG should_bump=$SHOULD_BUMP"
+
+      - name: Bump versions and push back to branch
+        # Only for manual dispatches that provided a version. Tag builds and
+        # empty-input dispatches must not rewrite files.
+        if: steps.resolve.outputs.should_bump == 'true'
+        run: |
+          VERSION="${{ steps.resolve.outputs.version }}"
+          bash tools/bump-version.sh "$VERSION"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add \
+            package.json \
+            src-tauri/tauri.conf.json \
+            src-tauri/Cargo.toml \
+            android/rust/landrop_mobile_bridge/Cargo.toml \
+            android/app/build.gradle.kts
+          if git diff --cached --quiet; then
+            echo "Version files already at $VERSION, nothing to commit."
+          else
+            git commit -m "chore(release): bump version to $VERSION"
+            # Plain push of the dispatch branch; never force-push, never merge.
+            git push origin "HEAD:${{ github.ref_name }}"
+          fi
+
+      - name: Determine build SHA
+        id: pin
+        run: |
+          # Downstream jobs check out this exact commit so Windows/Android
+          # builds always use the (possibly just bumped) version.
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Create (or reuse) draft release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.resolve.outputs.tag }}
+          # New tags point at the bumped commit; existing tags are reused.
+          target_commitish: ${{ steps.pin.outputs.sha }}
+          name: LanDrop ${{ steps.resolve.outputs.tag }}
+          draft: true
+          prerelease: false
+          generate_release_notes: true
+          fail_on_unmatched_files: false
+
+  # ---------------------------------------------------------------------------
+  build-windows:
+    name: Build Windows (NSIS + MSI + portable)
+    needs: prepare
+    runs-on: windows-latest
+    steps:
+      - name: Checkout release commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.commit_sha }}
+
+      - name: Setup Node LTS
+        uses: actions/setup-node@v4
+        with:
+          node-version: 'lts/*'
+          cache: 'npm'
+
+      - name: Setup Rust stable (MSVC)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # WebView2 is preinstalled on windows-latest runners; nothing to install.
+      # WiX Toolset (for MSI) is also available on windows-latest.
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build Tauri NSIS + MSI bundles
+        # tauri.conf.json sets bundle.targets=["nsis","msi"] and
+        # build.beforeBuildCommand="npm.cmd run build", which works on GHA
+        # Windows runners once `npm ci` has run (previous step).
+        run: npm run tauri build
+
+      - name: Create portable zip
+        # Tauri 2 has no built-in "portable" target. Zip the release binary
+        # (productName LanDrop.exe, or cargo package landrop-desktop.exe)
+        # plus a PORTABLE.txt noting system WebView2 is required.
+        shell: pwsh
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $releaseDir = 'src-tauri/target/release'
+          $candidates = @(
+            (Join-Path $releaseDir 'LanDrop.exe'),
+            (Join-Path $releaseDir 'landrop-desktop.exe')
+          )
+          $exe = $null
+          foreach ($c in $candidates) {
+            if (Test-Path -LiteralPath $c) {
+              $exe = $c
+              break
+            }
+          }
+          if (-not $exe) {
+            Write-Error "Portable zip failed: neither LanDrop.exe nor landrop-desktop.exe found under $releaseDir. Checked: $($candidates -join ', ')"
+            exit 1
+          }
+          Write-Host "Using portable binary: $exe"
+
+          $stage = Join-Path $env:RUNNER_TEMP 'landrop-portable'
+          if (Test-Path -LiteralPath $stage) { Remove-Item -Recurse -Force $stage }
+          New-Item -ItemType Directory -Path $stage | Out-Null
+
+          Copy-Item -LiteralPath $exe -Destination (Join-Path $stage 'LanDrop.exe')
+
+          # Include any sidecar resources sitting next to the exe (none expected today).
+          Get-ChildItem -LiteralPath $releaseDir -File | Where-Object {
+            $_.Name -ne (Split-Path $exe -Leaf) -and
+            (
+              $_.Extension -in @('.dll', '.bin') -or
+              $_.Name -like '*sidecar*'
+            )
+          } | ForEach-Object {
+            Write-Host "Including sidecar resource: $($_.FullName)"
+            Copy-Item -LiteralPath $_.FullName -Destination $stage
+          }
+
+          @(
+            'LanDrop portable build',
+            '======================',
+            '',
+            'This zip contains a standalone LanDrop.exe — no installer required.',
+            '',
+            'Requirements:',
+            '  - Microsoft Edge WebView2 Runtime must already be installed on the system',
+            '    (most Windows 10/11 machines have it; otherwise install from',
+            '    https://developer.microsoft.com/microsoft-edge/webview2/).',
+            '',
+            'Run LanDrop.exe directly from this folder. Settings and data stay on this machine.'
+          ) | Set-Content -LiteralPath (Join-Path $stage 'PORTABLE.txt') -Encoding UTF8
+
+          $zipName = "landrop-windows-portable-$env:TAG.zip"
+          $zipPath = Join-Path $releaseDir $zipName
+          if (Test-Path -LiteralPath $zipPath) { Remove-Item -Force $zipPath }
+          Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zipPath -Force
+          Write-Host "Created portable zip: $zipPath"
+          Get-Item -LiteralPath $zipPath | Format-List Name, Length, FullName
+
+      - name: Upload NSIS installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: landrop-windows-nsis-${{ needs.prepare.outputs.tag }}
+          path: src-tauri/target/release/bundle/nsis/*
+          if-no-files-found: error
+
+      - name: Upload MSI installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: landrop-windows-msi-${{ needs.prepare.outputs.tag }}
+          path: src-tauri/target/release/bundle/msi/*
+          if-no-files-found: error
+
+      - name: Upload portable zip artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: landrop-windows-portable-${{ needs.prepare.outputs.tag }}
+          path: src-tauri/target/release/landrop-windows-portable-*.zip
+          if-no-files-found: error
+
+      - name: Attach Windows artifacts to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          draft: true
+          files: |
+            src-tauri/target/release/bundle/nsis/*
+            src-tauri/target/release/bundle/msi/*
+            src-tauri/target/release/landrop-windows-portable-*.zip
+          fail_on_unmatched_files: true
+
+  # ---------------------------------------------------------------------------
+  build-android:
+    name: Build Android (APK / AAB)
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout release commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.commit_sha }}
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          cache: 'gradle'
+
+      - name: Configure Android SDK
+        env:
+          ANDROID_HOME: /usr/local/lib/android/sdk
+          ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
+          echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
+
+      - name: Install SDK platforms & accept licenses
+        # compileSdk=36 / targetSdk=36 per android/app/build.gradle.kts.
+        run: |
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" --install "platforms;android-36" "platform-tools" "build-tools;36.0.0"
+
+      - name: Decode Android keystore (signed builds only)
+        id: keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/landrop-release.jks"
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            echo "path=$RUNNER_TEMP/landrop-release.jks" >> "$GITHUB_OUTPUT"
+            echo "Signing secrets present: will produce signed APK + AAB."
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "No release signing secrets: CI will publish only a debug-signed APK."
+            echo "Unsigned release APKs are never published because Android cannot install them."
+          fi
+
+      - name: Build APK/AAB
+        # CI uses the committed prebuilt JNI libs at
+        # android/app/src/main/jniLibs/{arm64-v8a,x86_64}/liblandrop_mobile_bridge.so;
+        # no Rust-for-Android toolchain is required.
+        #
+        # Signed path (secrets present): build a signed release APK/AAB.
+        # No-signing path: build only the debug APK. Do NOT build/publish
+        # app-release-unsigned.apk because Android rejects unsigned APKs.
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          cd android
+          chmod +x ./gradlew
+          if [ "${{ steps.keystore.outputs.available }}" = "true" ]; then
+            if [ -z "$KEYSTORE_PASSWORD" ] || [ -z "$KEY_ALIAS" ] || [ -z "$KEY_PASSWORD" ]; then
+              echo "::error::ANDROID_KEYSTORE_BASE64 is set but PASSWORD/ALIAS/KEY_PASSWORD secrets are incomplete."
+              exit 1
+            fi
+            ./gradlew :app:assembleRelease :app:bundleRelease \
+              "-Pandroid.injected.signing.store.file=${{ steps.keystore.outputs.path }}" \
+              "-Pandroid.injected.signing.store.password=$KEYSTORE_PASSWORD" \
+              "-Pandroid.injected.signing.key.alias=$KEY_ALIAS" \
+              "-Pandroid.injected.signing.key.password=$KEY_PASSWORD"
+          else
+            ./gradlew :app:assembleDebug
+          fi
+
+      - name: Stage and verify Android release files
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          OUT="$GITHUB_WORKSPACE/android/release-out"
+          rm -rf "$OUT"
+          mkdir -p "$OUT"
+          APKSIGNER="$ANDROID_HOME/build-tools/36.0.0/apksigner"
+
+          if [ "${{ steps.keystore.outputs.available }}" = "true" ]; then
+            APK="$(find "$GITHUB_WORKSPACE/android/app/build/outputs/apk/release" -maxdepth 1 -type f -name '*.apk' ! -name '*unsigned*' | head -n 1)"
+            if [ -z "$APK" ]; then
+              echo "::error::Signed release APK was not produced."
+              exit 1
+            fi
+            "$APKSIGNER" verify --verbose "$APK"
+            cp "$APK" "$OUT/LanDrop-$TAG-android.apk"
+
+            AAB="$(find "$GITHUB_WORKSPACE/android/app/build/outputs/bundle/release" -maxdepth 1 -type f -name '*.aab' | head -n 1 || true)"
+            if [ -n "$AAB" ]; then
+              cp "$AAB" "$OUT/LanDrop-$TAG-android.aab"
+            fi
+          else
+            APK="$GITHUB_WORKSPACE/android/app/build/outputs/apk/debug/app-debug.apk"
+            if [ ! -f "$APK" ]; then
+              echo "::error::Debug APK was not produced."
+              exit 1
+            fi
+            "$APKSIGNER" verify --verbose "$APK"
+            cp "$APK" "$OUT/LanDrop-$TAG-android-debug.apk"
+            cat > "$OUT/ANDROID-DEBUG-BUILD.txt" <<'EOF'
+          This APK is debug-signed because Android release signing secrets are not configured.
+          It is installable, unlike an unsigned release APK.
+          Android may require uninstalling an older debug build if that older APK was signed
+          by a different CI debug key. Configure the repository Android signing secrets for
+          stable upgradeable release APKs.
+          EOF
+          fi
+
+          echo "Android release files:"
+          ls -lh "$OUT"
+
+      - name: Upload Android artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: landrop-android-${{ needs.prepare.outputs.tag }}
+          path: android/release-out/*
+          if-no-files-found: error
+
+      - name: Attach Android files to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          draft: true
+          files: android/release-out/*
+          fail_on_unmatched_files: true

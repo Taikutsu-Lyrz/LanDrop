@@ -1,0 +1,47 @@
+name: Android Branch Build
+
+on:
+  push:
+    branches:
+      - fix/android-tab-history-performance
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-android:
+    name: Build Android
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Install Android 36 SDK
+        env:
+          ANDROID_HOME: /usr/local/lib/android/sdk
+          ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+        run: |
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" --install "platforms;android-36" "platform-tools" "build-tools;36.0.0"
+
+      - name: Build Android debug APK
+        run: |
+          cd android
+          chmod +x ./gradlew
+          ./gradlew :app:assembleDebug
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: landrop-android-branch-debug
+          path: android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
