@@ -17,6 +17,37 @@ The current app uses a Rust/Tauri desktop backend for Windows, a Svelte desktop 
 - QR-based Wi-Fi Direct connections with an always-available stop control.
 - Secure remote invites for direct port-forwarded transfers or private overlay networks (such as Tailscale, Headscale, or WireGuard).
 
+## Screenshots
+
+Click any screenshot to view it at full size.
+
+### Windows
+
+| Receive | Send |
+| --- | --- |
+| [<img src="docs/screenshots/windows/receive.png" width="480" alt="LanDrop on Windows: receive screen and a completed transfer">](docs/screenshots/windows/receive.png) | [<img src="docs/screenshots/windows/send.png" width="480" alt="LanDrop on Windows: send screen with a nearby Android device">](docs/screenshots/windows/send.png) |
+
+| Transfer history | Incoming transfer |
+| --- | --- |
+| [<img src="docs/screenshots/windows/transfer-history.png" width="480" alt="LanDrop on Windows: recent transfer history">](docs/screenshots/windows/transfer-history.png) | [<img src="docs/screenshots/windows/incoming-transfer.png" width="480" alt="LanDrop on Windows: incoming transfer approval">](docs/screenshots/windows/incoming-transfer.png) |
+
+<details>
+<summary>Wi-Fi Direct connection</summary>
+
+[<img src="docs/screenshots/windows/wifi-direct.png" width="960" alt="LanDrop on Windows: Wi-Fi Direct QR pairing and stop control">](docs/screenshots/windows/wifi-direct.png)
+
+</details>
+
+### Android
+
+| Receive | Send | Ready to send |
+| --- | --- | --- |
+| [<img src="docs/screenshots/android/receive.png" width="240" alt="LanDrop on Android: receive and Quick Save controls">](docs/screenshots/android/receive.png) | [<img src="docs/screenshots/android/send.png" width="240" alt="LanDrop on Android: file selection and nearby devices">](docs/screenshots/android/send.png) | [<img src="docs/screenshots/android/ready-to-send.png" width="240" alt="LanDrop on Android: selected files ready to send">](docs/screenshots/android/ready-to-send.png) |
+
+| Incoming transfer | Transfer progress | Wi-Fi Direct |
+| --- | --- | --- |
+| [<img src="docs/screenshots/android/incoming-transfer.png" width="240" alt="LanDrop on Android: incoming transfer approval">](docs/screenshots/android/incoming-transfer.png) | [<img src="docs/screenshots/android/transfer-progress.png" width="240" alt="LanDrop on Android: transfer progress with pause and cancel controls">](docs/screenshots/android/transfer-progress.png) | [<img src="docs/screenshots/android/wifi-direct.png" width="240" alt="LanDrop on Android: Wi-Fi Direct QR pairing and stop control">](docs/screenshots/android/wifi-direct.png) |
+
 ## Repository Layout
 
 - `src/` - Svelte desktop UI.
