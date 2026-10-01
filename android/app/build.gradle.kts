@@ -11,9 +11,15 @@ android {
         applicationId = "dev.landrop.mobile"
         minSdk = 26
         targetSdk = 36
-        versionCode = 100
+        // Play updates require a new build code; local builds retain the current code by default.
+        versionCode = providers.gradleProperty("landropVersionCode").getOrElse("100").toInt()
         versionName = "0.1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    // Clean release builds can supply freshly compiled JNI libraries for every ABI.
+    providers.gradleProperty("landropJniLibsDir").orNull?.let { nativeDir ->
+        sourceSets.getByName("main").jniLibs.setSrcDirs(listOf(nativeDir))
     }
 
     signingConfigs {
@@ -72,6 +78,7 @@ dependencies {
 
     debugImplementation("androidx.compose.ui:ui-tooling:1.11.4")
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20180813")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
     androidTestImplementation("androidx.test:runner:1.6.2")
     androidTestImplementation("androidx.test:rules:1.6.1")

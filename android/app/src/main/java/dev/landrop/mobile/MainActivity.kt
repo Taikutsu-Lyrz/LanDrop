@@ -111,6 +111,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -162,7 +163,7 @@ import kotlinx.coroutines.delay
 /** Unacked 1 MiB chunks allowed in flight per TCP stream (mirrors desktop). */
 private const val CHUNK_ACK_WINDOW = 16
 
-private data class PendingChunkAck(
+internal data class PendingChunkAck(
     val relativePath: String,
     val nextOffset: Long,
     val sequence: Long
@@ -1496,7 +1497,15 @@ private fun LanDropApp(
                                                     activeSockets = activeSendSockets
                                                 )
                                             }.getOrElse { error ->
-                                                SendResult.Failure(error.message ?: "Transfer failed.")
+                                                android.util.Log.e("LanDropTransfer", "Send failed", error)
+                                                SendResult.Failure(
+                                                    if (sendCancelFlag.get()) "Transfer canceled by user."
+                                                    else error.message ?: "Transfer failed."
+                                                )
+                                            }
+                                            if (result is SendResult.Failure) {
+                                                AppLog.add("Send failed: ${result.message}")
+                                                android.util.Log.e("LanDropTransfer", "Send failed: ${result.message}")
                                             }
 
                                             mainHandler.post {
@@ -1522,7 +1531,6 @@ private fun LanDropApp(
                                                     is SendResult.Failure -> {
                                                         val message = result.message
                                                         if (
-                                                            sendCancelFlag.get() ||
                                                             message.contains("canceled", ignoreCase = true) ||
                                                             message.contains("cancelled", ignoreCase = true)
                                                         ) {
@@ -2313,7 +2321,7 @@ private fun sendPickedFiles(
                 .put("offset", offset)
             writeControlMessage(output, start, controlWriteLock)
 
-            openTransferInputStream(context, file)?.use { raw ->
+            useTransferSource(openTransferInputStream(context, file), file.relativePath) { raw ->
                 val stream = BufferedInputStream(raw, buffer.size)
                 skipFully(stream, offset)
                 var remaining = size - offset
@@ -2359,7 +2367,7 @@ private fun sendPickedFiles(
                         )
                     }
                 }
-            } ?: return SendResult.Failure("Could not open ${file.relativePath}.")
+            }
         }
 
         writeControlMessage(
@@ -2431,7 +2439,7 @@ private fun sendPickedFilesFramedV2(
                 .put("offset", offset)
         )
 
-        openTransferInputStream(context, file)?.use { raw ->
+        useTransferSource(openTransferInputStream(context, file), file.relativePath) { raw ->
             val stream = BufferedInputStream(raw, buffer.size)
             skipFully(stream, offset)
             var remaining = size - offset
@@ -2613,7 +2621,7 @@ private fun sendPickedFilesFramedV2(
                 }
                 sequence += 1
             }
-        } ?: return SendResult.Failure("Could not open ${file.relativePath}.")
+        }
 
         flushPendingChunkAcks(
             input = input,
@@ -2736,7 +2744,10 @@ private fun sendPickedFilesFramedV2Parallel(
                     error = error
                 )
             } catch (failure: Throwable) {
-                error.compareAndSet(null, failure.message ?: "Android parallel worker failed.")
+                val message = "Worker $index: ${failure.message ?: failure.javaClass.simpleName}"
+                AppLog.add(message)
+                android.util.Log.e("LanDropTransfer", message, failure)
+                error.compareAndSet(null, message)
                 cancelFlag.set(true)
             } finally {
                 done.countDown()
@@ -2810,6 +2821,7 @@ private fun sendAndroidParallelWorker(
         while (!session.cancelFlag.get()) {
             val file = queue.poll() ?: break
             session.activeFiles[workerId] = file.relativePath
+            android.util.Log.i("LanDropTransfer", "Worker $workerId sending ${file.relativePath} (${file.sizeBytes} bytes)")
             try {
                 sendAndroidParallelFile(
                     session = session,
@@ -2872,7 +2884,7 @@ private fun sendAndroidParallelFile(
         workerLock
     )
 
-    openTransferInputStream(session.context, file)?.use { raw ->
+    useTransferSource(openTransferInputStream(session.context, file), relativePath) { raw ->
         val stream = BufferedInputStream(raw, buffer.size)
         skipFully(stream, offset)
         var remaining = size - offset
@@ -3047,7 +3059,7 @@ private fun sendAndroidParallelFile(
             onPeerPaused = session.onPeerPaused,
             onPeerResumed = session.onPeerResumed
         )?.let { error(it) }
-    } ?: error("Could not open $relativePath.")
+    }
 
     writeControlMessage(
         output,
@@ -3077,7 +3089,7 @@ private fun flowControlMessage(transferId: String, state: String): JSONObject {
         .put("sentAtMs", System.currentTimeMillis())
 }
 
-private fun noteChunkSentAndManageAckWindow(
+internal fun noteChunkSentAndManageAckWindow(
     input: DataInputStream,
     output: DataOutputStream,
     controlWriteLock: Any,
@@ -3090,6 +3102,8 @@ private fun noteChunkSentAndManageAckWindow(
     onPeerPaused: () -> Unit,
     onPeerResumed: () -> Unit
 ): String? {
+    // Register before reading: Windows may already have acknowledged this chunk.
+    pending.addLast(ack)
     drainReadyChunkAcks(
         input = input,
         output = output,
@@ -3102,7 +3116,6 @@ private fun noteChunkSentAndManageAckWindow(
         onPeerPaused = onPeerPaused,
         onPeerResumed = onPeerResumed
     )?.let { return it }
-    pending.addLast(ack)
     while (pending.size >= CHUNK_ACK_WINDOW) {
         waitForNextChunkAck(
             input = input,
@@ -4370,14 +4383,20 @@ private fun QuickSaveControl(mode: QuickSaveMode, onModeChange: (QuickSaveMode) 
         QuickSaveMode.Favorites to "Favorites",
         QuickSaveMode.On to "On"
     )
-    SingleChoiceSegmentedButtonRow(modifier = Modifier.width(310.dp)) {
-        options.forEachIndexed { index, option ->
-            SegmentedButton(
-                selected = mode == option.first,
-                onClick = { onModeChange(option.first) },
-                shape = SegmentedButtonDefaults.itemShape(index = index, count = options.size),
-                label = { Text(option.second) }
-            )
+    // Recreate Material outlines when direction changes; cached paths can retain the old ends.
+    key(LocalLayoutDirection.current) {
+        SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+            options.forEachIndexed { index, option ->
+                SegmentedButton(
+                    selected = mode == option.first,
+                    onClick = { onModeChange(option.first) },
+                    shape = SegmentedButtonDefaults.itemShape(
+                        index = index,
+                        count = options.size
+                    ),
+                    label = { Text(option.second, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                )
+            }
         }
     }
 }
@@ -4385,18 +4404,24 @@ private fun QuickSaveControl(mode: QuickSaveMode, onModeChange: (QuickSaveMode) 
 @Composable
 private fun ReceiveModeControl(receiveEnabled: Boolean, onToggleReceive: () -> Unit) {
     val options = listOf(false to "Receive off", true to "Receive on")
-    SingleChoiceSegmentedButtonRow(modifier = Modifier.width(310.dp)) {
-        options.forEachIndexed { index, option ->
-            SegmentedButton(
-                selected = receiveEnabled == option.first,
-                onClick = {
-                    if (receiveEnabled != option.first) {
-                        onToggleReceive()
-                    }
-                },
-                shape = SegmentedButtonDefaults.itemShape(index = index, count = options.size),
-                label = { Text(option.second) }
-            )
+    // Recreate Material outlines when direction changes; cached paths can retain the old ends.
+    key(LocalLayoutDirection.current) {
+        SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+            options.forEachIndexed { index, option ->
+                SegmentedButton(
+                    selected = receiveEnabled == option.first,
+                    onClick = {
+                        if (receiveEnabled != option.first) {
+                            onToggleReceive()
+                        }
+                    },
+                    shape = SegmentedButtonDefaults.itemShape(
+                        index = index,
+                        count = options.size
+                    ),
+                    label = { Text(option.second, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                )
+            }
         }
     }
 }
@@ -5923,14 +5948,20 @@ private fun ThemeModeControl(mode: ThemeMode, onModeChange: (ThemeMode) -> Unit)
         ThemeMode.Oled to "OLED",
         ThemeMode.Light to "Light"
     )
-    SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-        options.forEachIndexed { index, option ->
-            SegmentedButton(
-                selected = mode == option.first,
-                onClick = { onModeChange(option.first) },
-                shape = SegmentedButtonDefaults.itemShape(index = index, count = options.size),
-                label = { Text(option.second) }
-            )
+    // Recreate Material outlines when direction changes; cached paths can retain the old ends.
+    key(LocalLayoutDirection.current) {
+        SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+            options.forEachIndexed { index, option ->
+                SegmentedButton(
+                    selected = mode == option.first,
+                    onClick = { onModeChange(option.first) },
+                    shape = SegmentedButtonDefaults.itemShape(
+                        index = index,
+                        count = options.size
+                    ),
+                    label = { Text(option.second, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                )
+            }
         }
     }
 }
@@ -5944,14 +5975,20 @@ private fun LanguageControl(
         AppLanguage.English to "English",
         AppLanguage.Dari to "دری"
     )
-    SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-        options.forEachIndexed { index, option ->
-            SegmentedButton(
-                selected = language == option.first,
-                onClick = { onLanguageChange(option.first) },
-                shape = SegmentedButtonDefaults.itemShape(index = index, count = options.size),
-                label = { Text(option.second) }
-            )
+    // Recreate Material outlines when direction changes; cached paths can retain the old ends.
+    key(LocalLayoutDirection.current) {
+        SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+            options.forEachIndexed { index, option ->
+                SegmentedButton(
+                    selected = language == option.first,
+                    onClick = { onLanguageChange(option.first) },
+                    shape = SegmentedButtonDefaults.itemShape(
+                        index = index,
+                        count = options.size
+                    ),
+                    label = { Text(option.second, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                )
+            }
         }
     }
 }

@@ -2,7 +2,7 @@ package dev.landrop.mobile
 
 import android.content.Context
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.staticCompositionLocalOf
+import androidx.compose.runtime.compositionLocalOf
 import org.json.JSONObject
 
 internal enum class AppLanguage {
@@ -10,8 +10,8 @@ internal enum class AppLanguage {
     Dari
 }
 
-internal val LocalAppLanguage = staticCompositionLocalOf { AppLanguage.English }
-internal val LocalAppTranslations = staticCompositionLocalOf { AppTranslations.Empty }
+internal val LocalAppLanguage = compositionLocalOf { AppLanguage.English }
+internal val LocalAppTranslations = compositionLocalOf { AppTranslations.Empty }
 
 internal class AppTranslations private constructor(
     private val exact: Map<String, String>,
