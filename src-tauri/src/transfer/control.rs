@@ -12,8 +12,9 @@ use crate::config::settings::QuickSaveMode;
 use crate::discovery::adapter::AdapterKind;
 use crate::events;
 use crate::notifications;
+use crate::transfer::error::{is_cancellation_error, transfer_error_message, PEER_CANCELED};
 use crate::transfer::protocol::{
-    read_message, write_message, ControlMessage, ParallelWorkerOpenMessage,
+    read_message, write_message, ControlMessage, FlowControlState, ParallelWorkerOpenMessage,
     ParallelWorkerReadyMessage, PeerHelloRequestMessage, PeerHelloResponseMessage,
     TransferEncoding, TransferOfferMessage, TransferReceiptMessage, TransferResponseMessage,
 };
@@ -320,6 +321,9 @@ async fn run_outgoing_offer(
     pause_flag: Arc<AtomicBool>,
 ) -> Result<(), String> {
     let transfer_id = offer.transfer_id.clone();
+    if cancel_flag.load(Ordering::SeqCst) {
+        return Err(CANCELED_MESSAGE.to_string());
+    }
     let target = format!("{}:{}", peer.ip, peer.port);
     let mut stream = timeout(CONNECT_TIMEOUT, TcpStream::connect(&target))
         .await
@@ -329,9 +333,7 @@ async fn run_outgoing_offer(
 
     write_message(&mut stream, &ControlMessage::TransferOffer(offer)).await?;
 
-    let response = timeout(OFFER_RESPONSE_TIMEOUT, read_message(&mut stream))
-        .await
-        .map_err(|_| "receiver did not answer in time".to_string())??;
+    let response = read_offer_response(&mut stream, &cancel_flag).await?;
 
     match response {
         ControlMessage::TransferResponse(response) => {
@@ -497,6 +499,23 @@ async fn run_outgoing_offer(
     Ok(())
 }
 
+async fn read_offer_response(
+    stream: &mut TcpStream,
+    cancel_flag: &AtomicBool,
+) -> Result<ControlMessage, String> {
+    tokio::select! {
+        biased;
+        _ = async {
+            while !cancel_flag.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        } => Err(CANCELED_MESSAGE.to_string()),
+        response = timeout(OFFER_RESPONSE_TIMEOUT, read_message(stream)) => {
+            response.map_err(|_| "receiver did not answer in time".to_string())?
+        }
+    }
+}
+
 async fn handle_connection(
     state: AppState,
     app: tauri::AppHandle,
@@ -628,15 +647,14 @@ async fn handle_incoming_offer(
     let is_remote_tunnel = sender_ip
         .parse::<IpAddr>()
         .is_ok_and(|address| address.is_loopback());
-    let selected_parallel_file_streams = if selected_transfer_encoding == TransferEncoding::FramedV2
-        && !is_remote_tunnel
-    {
-        offered_parallel_file_streams
-            .min(bootstrap.settings.concurrent_file_streams.max(1))
-            .max(1)
-    } else {
-        1
-    };
+    let selected_parallel_file_streams =
+        if selected_transfer_encoding == TransferEncoding::FramedV2 && !is_remote_tunnel {
+            offered_parallel_file_streams
+                .min(bootstrap.settings.concurrent_file_streams.max(1))
+                .max(1)
+        } else {
+            1
+        };
     let incoming_offer = offer.into_incoming_offer();
     let quick_save_destination = match bootstrap.settings.quick_save_mode {
         QuickSaveMode::On => bootstrap.settings.default_receive_folder.clone(),
@@ -703,62 +721,80 @@ async fn handle_incoming_offer(
         ),
     );
 
-    let (accepted, response_message, receiver_status, destination_path) =
-        if let Some(save_path) = quick_save_destination {
-            (
-                true,
-                "Receiver approved the transfer automatically.".to_string(),
-                format!("Quick Save into {}", save_path),
-                Some(save_path),
-            )
-        } else {
-            match timeout(
-                OFFER_RESPONSE_TIMEOUT,
+    let (accepted, response_message, receiver_status, destination_path) = if let Some(save_path) =
+        quick_save_destination
+    {
+        (
+            true,
+            "Receiver approved the transfer automatically.".to_string(),
+            format!("Quick Save into {}", save_path),
+            Some(save_path),
+        )
+    } else {
+        let decision = timeout(
+            OFFER_RESPONSE_TIMEOUT,
+            wait_incoming_decision(
+                stream,
+                &incoming_offer.transfer_id,
                 decision_rx.expect("manual approval receiver missing"),
-            )
-            .await
+            ),
+        )
+        .await;
+        if let Ok(Err(error)) = decision {
+            state
+                .cancel_pending_incoming(&incoming_offer.transfer_id)
+                .await;
+            if state
+                .clear_incoming_offer(&incoming_offer.transfer_id)
+                .await
             {
-                Ok(Ok(IncomingTransferDecision {
-                    accept: true,
-                    save_path: Some(save_path),
-                })) => (
-                    true,
-                    "Receiver approved the transfer.".to_string(),
-                    format!("Ready to save into {}", save_path),
-                    Some(save_path),
-                ),
-                Ok(Ok(IncomingTransferDecision {
-                    accept: true,
-                    save_path: None,
-                })) => (
-                    false,
-                    "Receiver approval needs a destination folder.".to_string(),
-                    "Approval was canceled because no save folder was chosen.".to_string(),
-                    None,
-                ),
-                Ok(Ok(IncomingTransferDecision {
-                    accept: false,
-                    save_path: _,
-                })) => (
-                    false,
-                    "Receiver rejected the transfer.".to_string(),
-                    "Receiver rejected the transfer.".to_string(),
-                    None,
-                ),
-                Ok(Err(_)) => (
-                    false,
-                    "Incoming approval flow closed before a response was received.".to_string(),
-                    "Incoming approval flow closed before a response was received.".to_string(),
-                    None,
-                ),
-                Err(_) => (
-                    false,
-                    "Receiver did not answer the transfer request in time.".to_string(),
-                    "Receiver did not answer the transfer request in time.".to_string(),
-                    None,
-                ),
+                events::emit_incoming_transfer(&app, &None)?;
             }
-        };
+            return finish_failed_incoming(&state, &app, &incoming_offer.transfer_id, error, false)
+                .await;
+        }
+        match decision {
+            Ok(Ok(IncomingTransferDecision {
+                accept: true,
+                save_path: Some(save_path),
+            })) => (
+                true,
+                "Receiver approved the transfer.".to_string(),
+                format!("Ready to save into {}", save_path),
+                Some(save_path),
+            ),
+            Ok(Ok(IncomingTransferDecision {
+                accept: true,
+                save_path: None,
+            })) => (
+                false,
+                "Receiver approval needs a destination folder.".to_string(),
+                "Approval was canceled because no save folder was chosen.".to_string(),
+                None,
+            ),
+            Ok(Ok(IncomingTransferDecision {
+                accept: false,
+                save_path: _,
+            })) => (
+                false,
+                "Receiver rejected the transfer.".to_string(),
+                "Receiver rejected the transfer.".to_string(),
+                None,
+            ),
+            Ok(Err(_)) => (
+                false,
+                "Incoming approval flow closed before a response was received.".to_string(),
+                "Incoming approval flow closed before a response was received.".to_string(),
+                None,
+            ),
+            Err(_) => (
+                false,
+                "Receiver did not answer the transfer request in time.".to_string(),
+                "Receiver did not answer the transfer request in time.".to_string(),
+                None,
+            ),
+        }
+    };
     state
         .cancel_pending_incoming(&incoming_offer.transfer_id)
         .await;
@@ -804,10 +840,22 @@ async fn handle_incoming_offer(
         )
     };
 
-    state.set_incoming_offer(None).await;
-    events::emit_incoming_transfer(&app, &None)?;
+    if state
+        .clear_incoming_offer(&incoming_offer.transfer_id)
+        .await
+    {
+        events::emit_incoming_transfer(&app, &None)?;
+    }
     emit_transfers(&state, &app).await?;
-    write_message(stream, &ControlMessage::TransferResponse(response)).await?;
+    if let Err(error) = write_message(stream, &ControlMessage::TransferResponse(response)).await {
+        if accepted {
+            let error =
+                stream::prefer_peer_cancel(stream, &incoming_offer.transfer_id, error).await;
+            return finish_failed_incoming(&state, &app, &incoming_offer.transfer_id, error, false)
+                .await;
+        }
+        return Err(error);
+    }
 
     if accepted {
         let destination_path = destination_path
@@ -834,8 +882,8 @@ async fn handle_incoming_offer(
                     &incoming_offer.transfer_id,
                     &incoming_offer.sender_name,
                     &destination_path,
-                    cancel_flag,
-                    pause_flag,
+                    cancel_flag.clone(),
+                    pause_flag.clone(),
                 )
                 .await
             }
@@ -847,8 +895,8 @@ async fn handle_incoming_offer(
                     &incoming_offer.transfer_id,
                     &incoming_offer.sender_name,
                     &destination_path,
-                    cancel_flag,
-                    pause_flag,
+                    cancel_flag.clone(),
+                    pause_flag.clone(),
                 )
                 .await
             }
@@ -863,17 +911,14 @@ async fn handle_incoming_offer(
                     )),
                 )
                 .await;
-                let status = if is_cancellation_error(&error) {
-                    TransferStatus::Canceled
-                } else {
-                    TransferStatus::Failed
-                };
-                state
-                    .set_transfer_status(&incoming_offer.transfer_id, status, Some(error.clone()))
-                    .await;
-                state.finish_transfer(&incoming_offer.transfer_id).await;
-                emit_transfers(&state, &app).await?;
-                return Err(error);
+                return finish_failed_incoming(
+                    &state,
+                    &app,
+                    &incoming_offer.transfer_id,
+                    error,
+                    cancel_flag.load(Ordering::SeqCst),
+                )
+                .await;
             }
         };
 
@@ -882,7 +927,28 @@ async fn handle_incoming_offer(
             Some("Receiver committed the transferred files to disk.".to_string()),
             Some(saved_into.clone()),
         );
-        write_message(stream, &ControlMessage::TransferReceipt(receipt)).await?;
+        if cancel_flag.load(Ordering::SeqCst) {
+            return finish_failed_incoming(
+                &state,
+                &app,
+                &incoming_offer.transfer_id,
+                CANCELED_MESSAGE.to_string(),
+                true,
+            )
+            .await;
+        }
+        if let Err(error) = write_message(stream, &ControlMessage::TransferReceipt(receipt)).await {
+            let error =
+                stream::prefer_peer_cancel(stream, &incoming_offer.transfer_id, error).await;
+            return finish_failed_incoming(
+                &state,
+                &app,
+                &incoming_offer.transfer_id,
+                error,
+                cancel_flag.load(Ordering::SeqCst),
+            )
+            .await;
+        }
 
         state
             .set_transfer_status(
@@ -921,9 +987,52 @@ async fn emit_transfers(state: &AppState, app: &tauri::AppHandle) -> Result<(), 
     events::emit_transfers_updated(app, &transfers)
 }
 
-fn is_cancellation_error(error: &str) -> bool {
-    let lower = error.to_ascii_lowercase();
-    lower.contains("canceled") || lower.contains("cancelled")
+async fn finish_failed_incoming(
+    state: &AppState,
+    app: &tauri::AppHandle,
+    transfer_id: &str,
+    error: String,
+    locally_canceled: bool,
+) -> Result<(), String> {
+    let error = transfer_error_message(error, locally_canceled);
+    let status = if is_cancellation_error(&error) {
+        TransferStatus::Canceled
+    } else {
+        TransferStatus::Failed
+    };
+    state
+        .set_transfer_status(transfer_id, status, Some(error.clone()))
+        .await;
+    let _ = state.cancel_transfer(transfer_id).await;
+    state.finish_transfer(transfer_id).await;
+    emit_transfers(state, app).await?;
+    Err(error)
+}
+
+async fn wait_incoming_decision(
+    stream: &mut TcpStream,
+    transfer_id: &str,
+    decision: tokio::sync::oneshot::Receiver<IncomingTransferDecision>,
+) -> Result<IncomingTransferDecision, String> {
+    let mut byte = [0u8; 1];
+    tokio::select! {
+        biased;
+        // Peeking can safely be abandoned if the UI answers. Once a byte is
+        // available, consume the whole frame before accepting any UI response.
+        readable = stream.peek(&mut byte) => {
+            readable.map_err(|error| error.to_string())?;
+            let message = timeout(CONNECT_TIMEOUT, read_message(stream)).await
+                .map_err(|_| "Sender did not finish the cancellation message.".to_string())??;
+            match message {
+                ControlMessage::TransferFlowControl(flow)
+                    if flow.transfer_id == transfer_id
+                        && matches!(flow.state, FlowControlState::CancelRequested) =>
+                    Err(PEER_CANCELED.to_string()),
+                _ => Err("Unexpected sender message before acceptance.".to_string()),
+            }
+        }
+        decision = decision => decision.map_err(|_| "Incoming approval flow closed before a response was received.".to_string()),
+    }
 }
 
 fn select_transfer_encoding(supported: Option<&[TransferEncoding]>) -> TransferEncoding {
@@ -935,6 +1044,166 @@ fn select_transfer_encoding(supported: Option<&[TransferEncoding]>) -> TransferE
         TransferEncoding::FramedV2
     } else {
         TransferEncoding::RawV1
+    }
+}
+
+#[cfg(test)]
+mod approval_tests {
+    use super::*;
+    use crate::transfer::protocol::{FlowControlReason, TransferFlowControlMessage};
+    use tokio::io::AsyncWriteExt;
+
+    async fn connected_pair() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let sender = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (receiver, _) = listener.accept().await.unwrap();
+        (sender, receiver)
+    }
+
+    fn cancel_message() -> ControlMessage {
+        ControlMessage::TransferFlowControl(TransferFlowControlMessage::new(
+            "pending".into(),
+            FlowControlState::CancelRequested,
+            FlowControlReason::User,
+        ))
+    }
+
+    #[tokio::test]
+    async fn sender_cancel_withdraws_offer_without_a_receiver_response() {
+        let (mut sender, mut receiver) = connected_pair().await;
+        let (_decision_tx, decision_rx) = tokio::sync::oneshot::channel();
+        write_message(&mut sender, &cancel_message()).await.unwrap();
+        assert_eq!(
+            timeout(
+                Duration::from_secs(1),
+                wait_incoming_decision(&mut receiver, "pending", decision_rx)
+            )
+            .await
+            .unwrap()
+            .unwrap_err(),
+            PEER_CANCELED
+        );
+    }
+
+    #[tokio::test]
+    async fn fragmented_cancel_is_not_lost_when_accept_arrives_mid_frame() {
+        let (mut sender, mut receiver) = connected_pair().await;
+        let (decision_tx, decision_rx) = tokio::sync::oneshot::channel();
+        let payload = serde_json::to_vec(&cancel_message()).unwrap();
+        let mut frame = (payload.len() as u32).to_be_bytes().to_vec();
+        frame.extend(payload);
+        sender.write_all(&frame[..2]).await.unwrap();
+        let task = tokio::spawn(async move {
+            wait_incoming_decision(&mut receiver, "pending", decision_rx).await
+        });
+        tokio::task::yield_now().await;
+        decision_tx
+            .send(IncomingTransferDecision {
+                accept: true,
+                save_path: Some("unused".into()),
+            })
+            .unwrap();
+        sender.write_all(&frame[2..]).await.unwrap();
+        assert_eq!(
+            timeout(Duration::from_secs(1), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap_err(),
+            PEER_CANCELED
+        );
+    }
+
+    #[tokio::test]
+    async fn disconnected_sender_releases_pending_approval() {
+        let (sender, mut receiver) = connected_pair().await;
+        let (_decision_tx, decision_rx) = tokio::sync::oneshot::channel();
+        drop(sender);
+        let error = timeout(
+            Duration::from_secs(1),
+            wait_incoming_decision(&mut receiver, "pending", decision_rx),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(
+            transfer_error_message(error, false),
+            crate::transfer::error::PEER_DISCONNECTED
+        );
+    }
+
+    #[tokio::test]
+    async fn receiver_can_accept_a_live_pending_offer() {
+        let (_sender, mut receiver) = connected_pair().await;
+        let (decision_tx, decision_rx) = tokio::sync::oneshot::channel();
+        decision_tx
+            .send(IncomingTransferDecision {
+                accept: true,
+                save_path: Some("chosen-folder".into()),
+            })
+            .unwrap();
+        let result = timeout(
+            Duration::from_secs(1),
+            wait_incoming_decision(&mut receiver, "pending", decision_rx),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(result.accept);
+        assert_eq!(result.save_path.as_deref(), Some("chosen-folder"));
+    }
+
+    #[tokio::test]
+    async fn cancel_while_receiver_is_silent_does_not_wait_five_minutes() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let sender = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (_receiver, _) = listener.accept().await.unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let task_cancel = cancel.clone();
+        let task = tokio::spawn(async move {
+            let mut sender = sender;
+            read_offer_response(&mut sender, &task_cancel).await
+        });
+        tokio::task::yield_now().await;
+        cancel.store(true, Ordering::SeqCst);
+        let error = timeout(Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error, CANCELED_MESSAGE);
+    }
+
+    #[tokio::test]
+    async fn rejected_offer_returns_the_receiver_reason_for_immediate_retry() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut sender = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (mut receiver, _) = listener.accept().await.unwrap();
+        write_message(
+            &mut receiver,
+            &ControlMessage::TransferResponse(TransferResponseMessage::rejected(
+                "test".to_string(),
+                Some("Choose a save folder.".to_string()),
+            )),
+        )
+        .await
+        .unwrap();
+        let response = read_offer_response(&mut sender, &AtomicBool::new(false))
+            .await
+            .unwrap();
+        match response {
+            ControlMessage::TransferResponse(response) => {
+                assert!(!response.accepted);
+                assert_eq!(response.message.as_deref(), Some("Choose a save folder."));
+            }
+            _ => panic!("unexpected response"),
+        }
     }
 }
 

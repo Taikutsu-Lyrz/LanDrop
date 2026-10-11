@@ -22,6 +22,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicReference
 
 data class IncomingOfferPrompt(
+    val transferId: String,
     val senderName: String,
     val senderIp: String,
     val senderDeviceId: String = "",
@@ -41,7 +42,7 @@ data class ReceiveProgress(
     val currentFiles: List<String> = listOf(currentFile)
 )
 
-class AndroidReceiver(
+internal class AndroidReceiver(
     private val context: Context,
     private val deviceId: String,
     private val deviceName: String,
@@ -50,11 +51,15 @@ class AndroidReceiver(
     private val concurrentFileStreamsProvider: () -> Int,
     private val pairCodeRequiredProvider: () -> Boolean,
     private val pairCodeProvider: () -> String,
-    private val requestApproval: (IncomingOfferPrompt) -> Boolean,
+    private val requestApproval: (IncomingOfferPrompt) -> TransferApproval,
+    private val onApprovalClosed: (String) -> Unit,
+    private val onSaveFolderUnavailable: (Uri?) -> Unit,
+    private val onError: (String) -> Unit,
     private val onProgress: (ReceiveProgress?) -> Unit,
     private val onStatus: (String) -> Unit
 ) {
     private val running = AtomicBoolean(false)
+    private val transferBusy = AtomicBoolean(false)
     private val cancelCurrent = AtomicBoolean(false)
     private val pauseCurrent = AtomicBoolean(false)
     private val peerPauseCurrent = AtomicBoolean(false)
@@ -523,7 +528,30 @@ class AndroidReceiver(
                 }
                 "transfer_offer" -> {
                     AppLog.add("Transfer offer received from ${socket.inetAddress.hostAddress}")
-                    handleTransferOffer(input, output, firstMessage = firstMessage, senderIp = socket.inetAddress.hostAddress ?: "")
+                    if (!transferBusy.compareAndSet(false, true)) {
+                        writeControl(output, transferResponse(firstMessage.optString("transferId"), false, "Android is busy with another transfer."))
+                    } else {
+                        try {
+                            handleTransferOffer(socket, input, output, firstMessage, socket.inetAddress.hostAddress ?: "")
+                        } catch (error: Exception) {
+                            if (running.get() && !cancelCurrent.get()) {
+                                val message = "Receive failed: ${error.message ?: "Connection closed."}"
+                                AppLog.add(message)
+                                onStatus(message)
+                                onError(message)
+                            }
+                        } finally {
+                            onApprovalClosed(firstMessage.optString("transferId"))
+                            activeOutput.set(null)
+                            activeTransferId.set(null)
+                            parallelSessions.remove(firstMessage.optString("transferId"))
+                            latestProgress = null
+                            onProgress(null)
+                            pauseCurrent.set(false)
+                            peerPauseCurrent.set(false)
+                            transferBusy.set(false)
+                        }
+                    }
                 }
                 "parallel_worker_open" -> {
                     handleParallelWorkerOpen(input, output, firstMessage)
@@ -539,6 +567,7 @@ class AndroidReceiver(
     }
 
     private fun handleTransferOffer(
+        socket: Socket,
         input: DataInputStream,
         output: DataOutputStream,
         firstMessage: JSONObject?,
@@ -550,18 +579,9 @@ class AndroidReceiver(
             return
         }
 
-        val saveTreeUri = saveTreeUriProvider()
-        if (saveTreeUri == null) {
-            writeControl(
-                output,
-                transferResponse(
-                    offer.optString("transferId"),
-                    false,
-                    "Choose a save folder on Android first."
-                )
-            )
-            onStatus("Choose a save folder before receiving.")
-            return
+        val previousSaveTree = saveTreeUriProvider()
+        if (receiveFolderProblem(context, previousSaveTree) != null) {
+            onSaveFolderUnavailable(previousSaveTree)
         }
 
         val transferId = offer.optString("transferId")
@@ -582,8 +602,10 @@ class AndroidReceiver(
         }
         cancelCurrent.set(false)
         pauseCurrent.set(false)
-        val approved = requestApproval(
+        peerPauseCurrent.set(false)
+        val approval = requestApproval(
             IncomingOfferPrompt(
+                transferId = transferId,
                 senderName = sender,
                 senderIp = senderIp,
                 senderDeviceId = offer.optString("senderDeviceId", ""),
@@ -592,16 +614,41 @@ class AndroidReceiver(
                 totalBytes = offer.optLong("totalBytes")
             )
         )
-        AppLog.add("Incoming offer decision for $sender: $approved")
-        if (!approved) {
-            AppLog.add("Incoming offer rejected by user: $sender")
-            writeControl(output, transferResponse(transferId, false, "Rejected on Android."))
+        val decision = try {
+            awaitTransferApproval(socket, input, approval, transferId)
+        } finally {
+            onApprovalClosed(transferId)
+        }
+        AppLog.add("Incoming offer decision for $sender: $decision")
+        if (decision != ApprovalResult.Accepted) {
+            val message = when (decision) {
+                ApprovalResult.Canceled -> "Transfer canceled by sender."
+                ApprovalResult.TimedOut -> "Transfer request timed out. Send again."
+                else -> "Rejected on Android."
+            }
+            if (decision != ApprovalResult.Canceled) {
+                writeControl(output, transferResponse(transferId, false, message))
+            }
+            onStatus(message)
+            return
+        }
+        // The user may have selected a folder in the approval dialog. Read it
+        // again and validate it before telling the sender that it can stream.
+        val saveTreeUri = saveTreeUriProvider()
+        val folderProblem = receiveFolderProblem(context, saveTreeUri)
+        if (folderProblem != null || saveTreeUri == null) {
+            val message = folderProblem ?: "Choose a save folder before receiving."
+            onSaveFolderUnavailable(saveTreeUri)
+            writeControl(output, transferResponse(transferId, false, message))
+            onStatus(message)
+            onError(message)
             return
         }
 
         onStatus("$sender is sending files...")
         // Keep the radio awake while receiving (see TransferWifiLock).
         TransferWifiLock.acquire(context)
+        try {
         writeControl(
             output,
             transferResponse(
@@ -615,9 +662,7 @@ class AndroidReceiver(
 
         val manifest = readControl(input)
         if (manifest.optString("type") != "transfer_manifest") {
-            onStatus("Receiver expected a manifest.")
-            TransferWifiLock.release()
-            return
+            error("Receiver expected a manifest.")
         }
 
         val entries = manifest.optJSONArray("entries") ?: JSONArray()
@@ -687,21 +732,16 @@ class AndroidReceiver(
         }
 
         if (selectedEncoding == "framed_v2" && selectedParallelFileStreams > 1 && initialCompletedBytes < totalBytes) {
-            try {
                 receiveFramedV2ParallelControl(
                     input = input,
                     output = output,
                     transferId = transferId,
                     sender = sender
                 )
-            } finally {
-                TransferWifiLock.release()
-            }
             return
         }
 
         if (selectedEncoding == "framed_v2") {
-            try {
                 receiveFramedV2(
                     input = input,
                     output = output,
@@ -713,9 +753,6 @@ class AndroidReceiver(
                     fileCount = manifestFileCount,
                     initialCompletedBytes = initialCompletedBytes
                 )
-            } finally {
-                TransferWifiLock.release()
-            }
             return
         }
 
@@ -725,9 +762,6 @@ class AndroidReceiver(
         var lastProgressAtMs = System.currentTimeMillis()
         var lastUiAtMs = 0L
 
-        // try/finally keeps the loop's indent to keep the diff small; every
-        // return or throw below still runs the finally and drops the lock.
-        try {
         while (true) {
             if (cancelCurrent.get()) {
                 writeControl(

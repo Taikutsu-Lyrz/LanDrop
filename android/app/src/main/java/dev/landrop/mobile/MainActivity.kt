@@ -6,16 +6,15 @@ import android.content.Context
 import android.net.wifi.WifiManager
 import android.content.Intent
 import android.content.SharedPreferences
-import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
 import android.provider.DocumentsContract
 import android.provider.OpenableColumns
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -31,6 +30,8 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.draggable
 import androidx.compose.foundation.gestures.rememberDraggableState
@@ -57,6 +58,7 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.CompareArrows
 import androidx.compose.material.icons.rounded.ArrowForward
 import androidx.compose.material.icons.rounded.Description
@@ -120,6 +122,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
@@ -135,7 +139,6 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.core.content.ContextCompat
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import org.json.JSONArray
@@ -143,8 +146,6 @@ import org.json.JSONObject
 import java.io.BufferedInputStream
 import java.io.DataInputStream
 import java.io.DataOutputStream
-import java.io.File
-import java.io.FileInputStream
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.util.ArrayDeque
@@ -270,6 +271,8 @@ private data class SendHistoryItem(
     val timestampMs: Long = System.currentTimeMillis()
 )
 
+private enum class SendPhase { Preparing, WaitingForAcceptance, Transferring, Canceling }
+
 private data class SendProgress(
     val peerName: String,
     val currentFile: String,
@@ -278,7 +281,8 @@ private data class SendProgress(
     val speedMbps: Double,
     val active: Boolean = true,
     val fileCount: Int = 0,
-    val currentFiles: List<String> = listOf(currentFile)
+    val currentFiles: List<String> = listOf(currentFile),
+    val phase: SendPhase = SendPhase.Transferring
 )
 
 private enum class QuickSaveMode {
@@ -453,7 +457,6 @@ private fun LanDropApp(
     var outboundPairCode by remember { mutableStateOf("") }
     var pickedItems by remember { mutableStateOf<List<PickedItem>>(emptyList()) }
     var discoveredPeers by remember { mutableStateOf<List<DiscoveredPeer>>(emptyList()) }
-    var receiveSaveTreeUri by remember { mutableStateOf<Uri?>(null) }
     var knownPeerIps by remember { mutableStateOf<Set<String>>(emptySet()) }
     var trustedDeviceIds by remember { mutableStateOf<Set<String>>(emptySet()) }
     var vpnPeers by remember { mutableStateOf<List<VpnSavedPeer>>(emptyList()) }
@@ -466,6 +469,9 @@ private fun LanDropApp(
     var receiveAutoNavigationUsed by remember { mutableStateOf(false) }
     var sendProgress by remember { mutableStateOf<SendProgress?>(null) }
     var sendInFlight by remember { mutableStateOf(false) }
+    var sendError by remember { mutableStateOf<String?>(null) }
+    var receiveError by remember { mutableStateOf<String?>(null) }
+    var receiveFolderError by remember { mutableStateOf<String?>(null) }
     var sendPeerPaused by remember { mutableStateOf(false) }
     val sendCancelFlag = remember { AtomicBoolean(false) }
     val sendPauseFlag = remember { AtomicBoolean(false) }
@@ -495,13 +501,18 @@ private fun LanDropApp(
     var receiveHistory by remember { mutableStateOf<List<ReceiveHistoryItem>>(emptyList()) }
     var sendHistory by remember { mutableStateOf<List<SendHistoryItem>>(emptyList()) }
     var historyLoaded by remember { mutableStateOf(false) }
-    var allFilesAccess by remember { mutableStateOf(hasAllFilesAccess()) }
     var status by remember {
         mutableStateOf("Enter a PC IP address or refresh nearby devices.")
     }
     val context = LocalContext.current
     val prefs = remember {
         context.getSharedPreferences("landrop_android", Context.MODE_PRIVATE)
+    }
+    var receiveSaveTreeUri by remember {
+        mutableStateOf(
+            prefs.getString("receive_save_tree_uri", null)?.let(Uri::parse)
+                ?.takeIf { receiveFolderProblem(context, it) == null }
+        )
     }
     val remoteTunnel = remember { AndroidRemoteTunnel() }
     var storedRemoteInvite by remember {
@@ -545,11 +556,6 @@ private fun LanDropApp(
     }
     if (knownPeerIps.isEmpty()) {
         knownPeerIps = prefs.getStringSet("known_peer_ips", emptySet()) ?: emptySet()
-    }
-    if (receiveSaveTreeUri == null) {
-        prefs.getString("receive_save_tree_uri", null)?.let { saved ->
-            receiveSaveTreeUri = Uri.parse(saved)
-        }
     }
     if (!historyLoaded) {
         receiveHistory = loadReceiveHistory(prefs)
@@ -669,11 +675,6 @@ private fun LanDropApp(
             connectRemoteInvite(invite, persist = false)
         }
     }
-    val permissionLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        AppLog.add("Legacy file read permission result: $granted")
-    }
     val filePicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
     ) { result ->
@@ -692,6 +693,8 @@ private fun LanDropApp(
                         uri,
                         Intent.FLAG_GRANT_READ_URI_PERMISSION
                     )
+                }.onFailure { error ->
+                    AppLog.add("Could not retain selected file access: ${error.message}")
                 }
                 val picked = describePickedUri(context, uri)
                 PickedItem(
@@ -703,19 +706,8 @@ private fun LanDropApp(
             }
             pickedItems = (pickedItems + nextItems)
                 .distinctBy { "${it.kind}:${it.uri}" }
-            status = "${pickedItems.size} file(s) staged."
+            status = "${pickedItems.size} file(s) selected."
         }
-    }
-    val allFilesAccessLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.StartActivityForResult()
-    ) {
-        allFilesAccess = hasAllFilesAccess()
-        status = if (allFilesAccess) {
-            "All files access enabled."
-        } else {
-            "All files access is still off."
-        }
-        AppLog.add("All files access: $allFilesAccess")
     }
     val folderPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocumentTree()
@@ -733,23 +725,30 @@ private fun LanDropApp(
                 uri = it.toString(),
                 sizeBytes = null
             )).distinctBy { item -> "${item.kind}:${item.uri}" }
-            status = "Folder staged."
+            status = "Folder selected."
         }
     }
     val receiveFolderPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocumentTree()
     ) { uri ->
         uri?.let {
-            runCatching {
+            val problem = runCatching {
                 context.contentResolver.takePersistableUriPermission(
                     it,
                     Intent.FLAG_GRANT_READ_URI_PERMISSION or
                         Intent.FLAG_GRANT_WRITE_URI_PERMISSION
                 )
+                receiveFolderProblem(context, it)
+            }.getOrElse { "Could not keep access to this folder. Choose it again." }
+            receiveFolderError = problem
+            if (problem == null) {
+                receiveSaveTreeUri = it
+                prefs.edit().putString("receive_save_tree_uri", it.toString()).apply()
+                status = "Receive folder selected."
+            } else {
+                status = problem
+                if (onboardingComplete && pendingIncomingOffer == null) receiveError = problem
             }
-            receiveSaveTreeUri = it
-            prefs.edit().putString("receive_save_tree_uri", it.toString()).apply()
-            status = "Receive folder selected."
         }
     }
     val receiver = remember(localDeviceName) {
@@ -758,7 +757,7 @@ private fun LanDropApp(
             deviceId = localDeviceId,
             deviceName = localDeviceName,
             saveTreeUriProvider = { receiveSaveTreeUri },
-            receiveEnabledProvider = { receiveEnabled },
+            receiveEnabledProvider = { receiveEnabled && onboardingComplete },
             concurrentFileStreamsProvider = { concurrentFileStreams },
             pairCodeRequiredProvider = { pairCodeEnabled },
             pairCodeProvider = { pairCode },
@@ -810,14 +809,14 @@ private fun LanDropApp(
                         mainHandler.post { vpnPeers = next }
                     }
                 }
-                if (!shouldAsk) {
+                val approval = TransferApproval()
+                if (!shouldAsk && receiveFolderProblem(context, receiveSaveTreeUri) == null) {
                     AppLog.add("Quick Save ${quickSaveMode.name}: auto-accepted ${offer.senderName} (${offer.senderIp})")
                     rememberSenderAsTrusted()
-                    true
+                    approval.decide(true)
                 } else {
-                    val latch = CountDownLatch(1)
-                    val decision = AtomicReference(false)
                     mainHandler.post {
+                        if (approval.decision() != null) return@post
                         if (!receiveAutoNavigationUsed) {
                             selectedTab = Tab.Receive
                             receiveAutoNavigationUsed = true
@@ -825,22 +824,40 @@ private fun LanDropApp(
                         status = "${offer.senderName} wants to send files."
                         AppLog.add("Showing incoming offer prompt for ${offer.senderName} (${offer.senderIp})")
                         pendingIncomingOffer = offer
-                        pendingIncomingDecision = { accepted ->
+                        pendingIncomingDecision = decision@ { accepted ->
                             AppLog.add("Incoming offer prompt answered: $accepted")
-                            decision.set(accepted)
+                            if (accepted && receiveSaveTreeUri == null) return@decision
+                            if (!approval.decide(accepted)) return@decision
                             pendingIncomingOffer = null
                             pendingIncomingDecision = null
                             if (!accepted) {
                                 receiveAutoNavigationUsed = false
                             }
-                            latch.countDown()
+                            if (accepted) rememberSenderAsTrusted()
                         }
                     }
-                    latch.await()
-                    val accepted = decision.get()
-                    if (accepted) rememberSenderAsTrusted()
-                    accepted
                 }
+                approval
+            },
+            onApprovalClosed = { transferId ->
+                mainHandler.post {
+                    if (pendingIncomingOffer?.transferId == transferId) {
+                        pendingIncomingOffer = null
+                        pendingIncomingDecision = null
+                        receiveAutoNavigationUsed = false
+                    }
+                }
+            },
+            onSaveFolderUnavailable = { previousUri ->
+                mainHandler.post {
+                    if (receiveSaveTreeUri == previousUri) {
+                        receiveSaveTreeUri = null
+                        prefs.edit().remove("receive_save_tree_uri").apply()
+                    }
+                }
+            },
+            onError = { message ->
+                mainHandler.post { receiveError = message }
             },
             onProgress = { progress ->
                 mainHandler.post {
@@ -875,7 +892,7 @@ private fun LanDropApp(
             context = context.applicationContext,
             deviceId = localDeviceId,
             deviceName = localDeviceName,
-            receiveEnabledProvider = { receiveEnabled },
+            receiveEnabledProvider = { receiveEnabled && onboardingComplete },
             pairCodeRequiredProvider = { pairCodeEnabled },
             onPeer = { peer ->
                 mainHandler.post {
@@ -1129,13 +1146,14 @@ private fun LanDropApp(
 
     if (!onboardingComplete) {
         OnboardingScreen(
-            allFilesAccess = allFilesAccess,
-            onManageAllFiles = {
-                allFilesAccessLauncher.launch(allFilesAccessIntent(context))
-            },
+            saveFolderName = receiveSaveTreeUri?.let(::describeTreeUri),
+            folderError = receiveFolderError,
+            onChooseSaveFolder = { receiveFolderPicker.launch(receiveSaveTreeUri) },
             onComplete = {
-                onboardingComplete = true
-                prefs.edit().putBoolean("onboarding_complete", true).apply()
+                if (receiveSaveTreeUri != null) {
+                    onboardingComplete = true
+                    prefs.edit().putBoolean("onboarding_complete", true).apply()
+                }
             }
         )
         return
@@ -1166,8 +1184,31 @@ private fun LanDropApp(
         pendingIncomingOffer?.let { offer ->
             IncomingOfferDialog(
                 offer = offer,
+                saveFolderName = receiveSaveTreeUri?.let(::describeTreeUri),
+                folderError = receiveFolderError,
+                onChooseSaveFolder = { receiveFolderPicker.launch(receiveSaveTreeUri) },
                 onAccept = { pendingIncomingDecision?.invoke(true) },
                 onReject = { pendingIncomingDecision?.invoke(false) }
+            )
+        }
+        sendError?.let { message ->
+            AlertDialog(
+                onDismissRequest = { sendError = null },
+                title = { Text("Could not send files") },
+                text = { Text(message) },
+                confirmButton = {
+                    TextButton(onClick = { sendError = null }) { Text("OK") }
+                }
+            )
+        }
+        receiveError?.let { message ->
+            AlertDialog(
+                onDismissRequest = { receiveError = null },
+                title = { Text("Could not receive files") },
+                text = { Text(message) },
+                confirmButton = {
+                    TextButton(onClick = { receiveError = null }) { Text("OK") }
+                }
             )
         }
         PullToRefreshBox(
@@ -1313,11 +1354,9 @@ private fun LanDropApp(
                             },
                             onCancelSend = {
                                 sendCancelFlag.set(true)
-                                // Close open send sockets so threads blocked in readInt/readFully wake immediately.
-                                closeActiveSendSockets()
                                 sendPauseFlag.set(false)
                                 sendPeerPaused = false
-                                sendProgress = sendProgress?.copy(active = false, speedMbps = 0.0)
+                                sendProgress = sendProgress?.copy(active = false, speedMbps = 0.0, phase = SendPhase.Canceling)
                                 sendControlOutput.get()?.let { output ->
                                     sendControlTransferId.get()?.let { transferId ->
                                         runCatching {
@@ -1331,20 +1370,10 @@ private fun LanDropApp(
                                         }
                                     }
                                 }
+                                closeActiveSendSockets()
                                 status = "Canceling send..."
                             },
-                            onFiles = {
-                                allFilesAccess = hasAllFilesAccess()
-                                if (Build.VERSION.SDK_INT >= 30 && !allFilesAccess) {
-                                    status = "Enable All files access to send from shared storage."
-                                    allFilesAccessLauncher.launch(allFilesAccessIntent(context))
-                                } else if (needsLegacyFileReadPermission(context)) {
-                                    permissionLauncher.launch(Manifest.permission.READ_EXTERNAL_STORAGE)
-                                    status = "Allow file access, then tap File again."
-                                } else {
-                                    filePicker.launch(openFilesIntent())
-                                }
-                            },
+                            onFiles = { filePicker.launch(openFilesIntent()) },
                             onFolder = { folderPicker.launch(null) },
                             onRefresh = {
                                 sendRefreshing = true
@@ -1460,6 +1489,17 @@ private fun LanDropApp(
                                         sendCancelFlag.set(false)
                                         sendPauseFlag.set(false)
                                         sendInFlight = true
+                                        sendError = null
+                                        sendProgress = SendProgress(
+                                            peerName = peer.name,
+                                            currentFile = "Scanning selection...",
+                                            completedBytes = 0L,
+                                            totalBytes = 0L,
+                                            speedMbps = 0.0,
+                                            fileCount = pickedItems.size,
+                                            phase = SendPhase.Preparing
+                                        )
+                                        val itemsToSend = pickedItems
                                         status = "Preparing files for ${peer.name}..."
                                         probeExecutor.execute {
                                             val result = runCatching {
@@ -1469,7 +1509,7 @@ private fun LanDropApp(
                                                     senderDeviceId = localDeviceId,
                                                     senderName = localDeviceName,
                                                     pairCode = outboundPairCode.takeIf { it.length == 6 },
-                                                    items = pickedItems,
+                                                    items = itemsToSend,
                                                     concurrentFileStreams = concurrentFileStreams,
                                                     cancelFlag = sendCancelFlag,
                                                     pauseFlag = sendPauseFlag,
@@ -1481,7 +1521,9 @@ private fun LanDropApp(
                                                     },
                                                     onProgress = { progress ->
                                                         mainHandler.post {
-                                                            sendProgress = progress
+                                                            sendProgress = if (progress != null && sendCancelFlag.get()) {
+                                                                progress.copy(active = false, speedMbps = 0.0, phase = SendPhase.Canceling)
+                                                            } else progress
                                                         }
                                                     },
                                                     onPeerPaused = {
@@ -1517,9 +1559,9 @@ private fun LanDropApp(
                                                         sendHistory = listOf(
                                                             SendHistoryItem(
                                                                 title = "Sent to ${peer.name}",
-                                                                detail = pickedItems.joinToString(
+                                                                detail = itemsToSend.joinToString(
                                                                     limit = 2,
-                                                                    truncated = if (pickedItems.size > 2) "..." else ""
+                                                                    truncated = if (itemsToSend.size > 2) "..." else ""
                                                                 ) { it.name }
                                                             )
                                                         ) + sendHistory
@@ -1539,6 +1581,11 @@ private fun LanDropApp(
                                                             message
                                                         }
                                                     }
+                                                }
+                                                sendError = when (result) {
+                                                    is SendResult.Success -> null
+                                                    is SendResult.Rejected -> status
+                                                    is SendResult.Failure -> status.takeUnless { it == "Send canceled." }
                                                 }
                                             }
                                         }
@@ -1639,7 +1686,6 @@ private fun LanDropApp(
                             networkDetails = networkDetails,
                             showLogs = showLogs,
                             logs = logs,
-                            allFilesAccess = allFilesAccess,
                             trustedDeviceIps = knownPeerIps.toList().sorted(),
                             vpnPeers = vpnPeers,
                             trustedDeviceIds = trustedDeviceIds,
@@ -1673,9 +1719,6 @@ private fun LanDropApp(
                                 concurrentFileStreams = count.coerceIn(1, 100)
                                 prefs.edit().putInt("concurrent_file_streams", concurrentFileStreams).apply()
                                 status = "Concurrent file streams set to $concurrentFileStreams."
-                            },
-                            onManageAllFiles = {
-                                allFilesAccessLauncher.launch(allFilesAccessIntent(context))
                             },
                             onRefreshDiscovery = {
                                 networkDetails = NetworkDetails.activeNetworkDetails(context)
@@ -1813,6 +1856,7 @@ private fun openFilesIntent(): Intent {
         putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
         putExtra(Intent.EXTRA_LOCAL_ONLY, true)
         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
     }
 }
 
@@ -1913,24 +1957,6 @@ private fun saveSendHistory(prefs: SharedPreferences, history: List<SendHistoryI
         )
     }
     prefs.edit().putString("send_history", array.toString()).apply()
-}
-
-private fun needsLegacyFileReadPermission(context: Context): Boolean {
-    return Build.VERSION.SDK_INT <= 32 &&
-        ContextCompat.checkSelfPermission(
-            context,
-            Manifest.permission.READ_EXTERNAL_STORAGE
-        ) != PackageManager.PERMISSION_GRANTED
-}
-
-private fun hasAllFilesAccess(): Boolean {
-    return Build.VERSION.SDK_INT < 30 || Environment.isExternalStorageManager()
-}
-
-private fun allFilesAccessIntent(context: Context): Intent {
-    return Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
-        data = Uri.parse("package:${context.packageName}")
-    }
 }
 
 private sealed interface ProbeResult {
@@ -2125,7 +2151,9 @@ private fun sendPickedFiles(
     activeSockets: ConcurrentLinkedQueue<Socket>? = null
 ): SendResult {
     onStatus("Scanning selection...")
-    val expanded = expandPickedItems(context, items)
+    if (cancelFlag.get()) return SendResult.Failure("Transfer canceled by user.")
+    val expanded = expandPickedItems(context, items, cancelFlag)
+    if (cancelFlag.get()) return SendResult.Failure("Transfer canceled by user.")
     val files = expanded.files
     val directories = expanded.directories
     if (files.isEmpty()) {
@@ -2146,7 +2174,8 @@ private fun sendPickedFiles(
             totalBytes = totalBytes,
             speedMbps = 0.0,
             active = true,
-            fileCount = files.size
+            fileCount = files.size,
+            phase = SendPhase.Preparing
         )
     )
     // Keep the radio awake for the whole transfer; without a
@@ -2159,10 +2188,10 @@ private fun sendPickedFiles(
     runCatching { socket.sendBufferSize = 2 * 1024 * 1024 }
     runCatching { socket.receiveBufferSize = 2 * 1024 * 1024 }
     activeSockets?.add(socket)
-    socket.connect(InetSocketAddress(peer.ip, peer.port), 5000)
-    socket.soTimeout = 300_000
-
     try {
+        if (cancelFlag.get()) return SendResult.Failure("Transfer canceled by user.")
+        socket.connect(InetSocketAddress(peer.ip, peer.port), 5000)
+        socket.soTimeout = 300_000
         socket.use {
             val input = DataInputStream(it.getInputStream())
             val output = DataOutputStream(it.getOutputStream())
@@ -2196,6 +2225,18 @@ private fun sendPickedFiles(
             .put("sentAtMs", System.currentTimeMillis())
 
         onStatus("Waiting for ${peer.name} to accept...")
+        onProgress(SendProgress(
+            peerName = peer.name,
+            currentFile = "Waiting for ${peer.name} to accept...",
+            completedBytes = 0L,
+            totalBytes = totalBytes,
+            speedMbps = 0.0,
+            fileCount = files.size,
+            currentFiles = listOf("Waiting for ${peer.name} to accept...") + files.take(4).map { it.relativePath },
+            phase = SendPhase.WaitingForAcceptance
+        ))
+        controlOutputRef.set(output)
+        controlTransferIdRef.set(transferId)
         writeControlMessage(output, offer, controlWriteLock)
         val response = readControlMessage(input)
         if (response.optString("type") != "transfer_response") {
@@ -2204,9 +2245,23 @@ private fun sendPickedFiles(
         if (!response.optBoolean("accepted")) {
             return SendResult.Rejected(response.optString("message", "Transfer rejected."))
         }
+        if (cancelFlag.get()) return SendResult.Failure("Transfer canceled by user.")
+        onProgress(SendProgress(
+            peerName = peer.name,
+            currentFile = "Preparing ${files.size} file(s)",
+            completedBytes = 0L,
+            totalBytes = totalBytes,
+            speedMbps = 0.0,
+            fileCount = files.size
+        ))
         val selectedEncoding = response.optString("selectedTransferEncoding", "raw_v1")
         if (selectedEncoding != "raw_v1" && selectedEncoding != "framed_v2") {
             return SendResult.Failure("Peer selected unknown transfer encoding: $selectedEncoding")
+        }
+        if (selectedEncoding == "raw_v1") {
+            // Raw data cannot contain JSON flow control after acceptance.
+            controlOutputRef.set(null)
+            controlTransferIdRef.set(null)
         }
         val selectedParallelFileStreams = response
             .optInt("selectedParallelFileStreams", 1)
@@ -2388,6 +2443,7 @@ private fun sendPickedFiles(
             return SendResult.Success
         }
     } finally {
+        runCatching { socket.close() }
         activeSockets?.remove(socket)
         controlOutputRef.set(null)
         controlTransferIdRef.set(null)
@@ -3430,32 +3486,12 @@ private fun openTransferInputStream(context: Context, file: TransferFile): java.
         context.contentResolver.openInputStream(file.uri)
     } catch (error: SecurityException) {
         AppLog.add("Cannot open ${file.relativePath}: ${error.message}")
-        openLegacyPrimaryDocumentFallback(context, file.uri)?.also {
-            AppLog.add("Using direct-path fallback for ${file.relativePath}")
-        } ?: throw IllegalStateException(
-            "Android denied access to ${file.relativePath}. Re-pick it from Files after allowing file access."
+        android.util.Log.e("LanDropStorage", "Selected-file access denied for ${file.relativePath}", error)
+        throw IllegalStateException(
+            "Android denied access to ${file.relativePath}. Select it again with the file picker.",
+            error
         )
     }
-}
-
-private fun openLegacyPrimaryDocumentFallback(context: Context, uri: Uri): java.io.InputStream? {
-    if ((Build.VERSION.SDK_INT >= 30 && !hasAllFilesAccess()) ||
-        (Build.VERSION.SDK_INT < 30 && needsLegacyFileReadPermission(context))
-    ) {
-        return null
-    }
-    if (uri.authority != "com.android.externalstorage.documents") {
-        return null
-    }
-    val documentId = runCatching { DocumentsContract.getDocumentId(uri) }.getOrNull() ?: return null
-    val parts = documentId.split(':', limit = 2)
-    if (parts.size != 2 || !parts[0].equals("primary", ignoreCase = true)) {
-        return null
-    }
-    val candidate = File("/storage/emulated/0", parts[1])
-    return runCatching { FileInputStream(candidate) }
-        .onFailure { AppLog.add("Direct-path fallback failed for $candidate: ${it.message}") }
-        .getOrNull()
 }
 
 private data class ExpandedSelection(
@@ -3463,11 +3499,12 @@ private data class ExpandedSelection(
     val files: List<TransferFile>
 )
 
-private fun expandPickedItems(context: Context, items: List<PickedItem>): ExpandedSelection {
+private fun expandPickedItems(context: Context, items: List<PickedItem>, cancelFlag: AtomicBoolean): ExpandedSelection {
     val directories = mutableListOf<TransferDirectory>()
     val files = mutableListOf<TransferFile>()
 
     items.forEach { item ->
+        check(!cancelFlag.get()) { "Transfer canceled by user." }
         if (item.kind == "Folder") {
             val rootUri = Uri.parse(item.uri)
             val rootName = safeRelativeName(item.name)
@@ -3478,7 +3515,8 @@ private fun expandPickedItems(context: Context, items: List<PickedItem>): Expand
                 documentId = DocumentsContract.getTreeDocumentId(rootUri),
                 relativeRoot = rootName,
                 directories = directories,
-                files = files
+                files = files,
+                cancelFlag = cancelFlag
             )
         } else {
             files += TransferFile(
@@ -3502,8 +3540,10 @@ private fun walkDocumentTree(
     documentId: String,
     relativeRoot: String,
     directories: MutableList<TransferDirectory>,
-    files: MutableList<TransferFile>
+    files: MutableList<TransferFile>,
+    cancelFlag: AtomicBoolean
 ) {
+    check(!cancelFlag.get()) { "Transfer canceled by user." }
     val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, documentId)
     val projection = arrayOf(
         DocumentsContract.Document.COLUMN_DOCUMENT_ID,
@@ -3521,6 +3561,7 @@ private fun walkDocumentTree(
         val modifiedIndex = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_LAST_MODIFIED)
 
         while (cursor.moveToNext()) {
+            check(!cancelFlag.get()) { "Transfer canceled by user." }
             val childId = cursor.getString(idIndex)
             val name = safeRelativeName(cursor.getString(nameIndex) ?: "item")
             val mime = cursor.getString(mimeIndex)
@@ -3539,7 +3580,8 @@ private fun walkDocumentTree(
                     documentId = childId,
                     relativeRoot = relativePath,
                     directories = directories,
-                    files = files
+                    files = files,
+                    cancelFlag = cancelFlag
                 )
             } else {
                 val documentUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, childId)
@@ -3583,27 +3625,11 @@ private fun BrandMark() {
 }
 
 @Composable
-private fun StatusCard(status: String) {
-    Card(
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        shape = RoundedCornerShape(20.dp)
-    ) {
-        Row(
-            modifier = Modifier.padding(16.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Icon(Icons.Rounded.Lan, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-            Text(status, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 14.sp)
-        }
-    }
-}
-
-@Composable
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 private fun OnboardingScreen(
-    allFilesAccess: Boolean,
-    onManageAllFiles: () -> Unit,
+    saveFolderName: String?,
+    folderError: String?,
+    onChooseSaveFolder: () -> Unit,
     onComplete: () -> Unit
 ) {
     var page by remember { mutableStateOf(0) }
@@ -3615,13 +3641,18 @@ private fun OnboardingScreen(
         ),
         Triple(
             "File access",
-            "Android asks before apps read your files. LanDrop uses file access only for items you choose to send.",
+            "Android's file picker gives LanDrop access only to the files and folders you choose.",
             Icons.Rounded.Description
         ),
         Triple(
-            "All files access",
-            "On Android 11 and newer, All files access lets LanDrop stream large shared-storage files reliably without making a second copy.",
+            "Choose what to share",
+            "Select files or folders with Android's file picker. LanDrop streams them directly without ZIP archives or temporary copies.",
             Icons.Rounded.Security
+        ),
+        Triple(
+            "Choose a save folder",
+            "Select where incoming files will be saved. You can change this folder later on the Receive screen.",
+            Icons.Rounded.Folder
         )
     )
     val heroScale by animateFloatAsState(
@@ -3637,16 +3668,21 @@ private fun OnboardingScreen(
         Column(
             modifier = Modifier
                 .fillMaxSize()
+                .windowInsetsPadding(WindowInsets.safeDrawing)
                 .padding(horizontal = 24.dp, vertical = 28.dp),
             verticalArrangement = Arrangement.SpaceBetween
         ) {
             Text("LanDrop", fontSize = 28.sp, fontWeight = FontWeight.Bold)
             AnimatedContent(
                 targetState = page,
+                modifier = Modifier.weight(1f).padding(vertical = 20.dp),
                 label = "onboardingPage"
             ) { targetPage ->
                 val animatedPage = pages[targetPage]
-                Column(verticalArrangement = Arrangement.spacedBy(18.dp)) {
+                Column(
+                    modifier = Modifier.verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(18.dp)
+                ) {
                     Surface(
                         modifier = Modifier
                             .size(88.dp)
@@ -3679,28 +3715,20 @@ private fun OnboardingScreen(
                                 modifier = Modifier.padding(16.dp),
                                 verticalArrangement = Arrangement.spacedBy(10.dp)
                             ) {
-                                Text("Why this access is required", fontWeight = FontWeight.Bold)
+                                Text("Save incoming files", fontWeight = FontWeight.Bold)
                                 Text(
-                                    "Android 11+ blocks direct reads from shared storage unless this permission is enabled. LanDrop needs it to stream big files directly to another device without creating a duplicate 40GB cache copy.",
+                                    "Android grants LanDrop access only to the receive folder you select.",
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     fontSize = 14.sp,
                                     lineHeight = 20.sp
                                 )
-                                Text(
-                                    "LanDrop still only sends files you choose. The permission is used for reliable high-speed reading, not background scanning.",
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    fontSize = 14.sp,
-                                    lineHeight = 20.sp
-                                )
+                                OutlinedButton(onClick = onChooseSaveFolder, modifier = Modifier.fillMaxWidth()) {
+                                    Icon(Icons.Rounded.Folder, contentDescription = null)
+                                    Spacer(Modifier.size(8.dp))
+                                    Text(saveFolderName ?: "Choose save folder", maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                }
+                                folderError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                             }
-                        }
-                        FilledTonalButton(
-                            onClick = onManageAllFiles,
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Icon(Icons.Rounded.Folder, contentDescription = null)
-                            Spacer(Modifier.size(8.dp))
-                            Text(if (allFilesAccess) "All files access enabled" else "Open permission settings")
                         }
                     }
                 }
@@ -3715,20 +3743,15 @@ private fun OnboardingScreen(
                     onClick = {
                         if (page < pages.lastIndex) {
                             page += 1
-                        } else if (allFilesAccess) {
-                            onComplete()
                         } else {
-                            onManageAllFiles()
+                            onComplete()
                         }
                     },
+                    enabled = page < pages.lastIndex || saveFolderName != null,
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text(
-                        when {
-                            page < pages.lastIndex -> "Next"
-                            allFilesAccess -> "Start using LanDrop"
-                            else -> "Grant file access"
-                        }
+                        if (page < pages.lastIndex) "Next" else "Start using LanDrop"
                     )
                 }
             }
@@ -3760,6 +3783,9 @@ private fun AnimatedPageDot(selected: Boolean) {
 @Composable
 private fun IncomingOfferDialog(
     offer: IncomingOfferPrompt,
+    saveFolderName: String?,
+    folderError: String?,
+    onChooseSaveFolder: () -> Unit,
     onAccept: () -> Unit,
     onReject: () -> Unit
 ) {
@@ -3782,10 +3808,17 @@ private fun IncomingOfferDialog(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontSize = 13.sp
                 )
+                if (saveFolderName == null) {
+                    Text("Choose a save folder to accept this transfer.")
+                    OutlinedButton(onClick = onChooseSaveFolder) { Text("Choose save folder") }
+                } else {
+                    Text("Save to $saveFolderName", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                folderError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             }
         },
         confirmButton = {
-            TextButton(onClick = onAccept) {
+            TextButton(onClick = onAccept, enabled = saveFolderName != null) {
                 Text("Accept")
             }
         },
@@ -3800,6 +3833,8 @@ private fun IncomingOfferDialog(
 @Composable
 private fun IncomingOfferInlineCard(
     offer: IncomingOfferPrompt,
+    saveFolderName: String?,
+    onChooseSaveFolder: () -> Unit,
     onAccept: () -> Unit,
     onReject: () -> Unit
 ) {
@@ -3825,8 +3860,8 @@ private fun IncomingOfferInlineCard(
                 fontSize = 12.sp
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = onAccept, modifier = Modifier.weight(1f)) {
-                    Text("Accept")
+                Button(onClick = if (saveFolderName == null) onChooseSaveFolder else onAccept, modifier = Modifier.weight(1f)) {
+                    Text(if (saveFolderName == null) "Choose save folder" else "Accept")
                 }
                 OutlinedButton(onClick = onReject, modifier = Modifier.weight(1f)) {
                     Text("Reject")
@@ -4148,6 +4183,8 @@ private fun ReceiveHomeScreen(
             Spacer(Modifier.height(18.dp))
             IncomingOfferInlineCard(
                 offer = offer,
+                saveFolderName = saveFolderName,
+                onChooseSaveFolder = onChooseSaveFolder,
                 onAccept = onAcceptIncoming,
                 onReject = onRejectIncoming
             )
@@ -4477,6 +4514,10 @@ private fun SendScreen(
             }
         }
 
+        sendProgress?.let { progress ->
+            SendProgressPanel(progress = progress, onPause = onPauseSend, onCancel = onCancelSend)
+        }
+
         Card(
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
             shape = RoundedCornerShape(24.dp)
@@ -4543,14 +4584,6 @@ private fun SendScreen(
             }
         }
 
-        sendProgress?.let { progress ->
-            SendProgressPanel(
-                progress = progress,
-                onPause = onPauseSend,
-                onCancel = onCancelSend
-            )
-        }
-
         StagedItemsPanel(
             items = pickedItems,
             connectedPeer = connectedPeer,
@@ -4589,14 +4622,22 @@ private fun SendProgressPanel(progress: SendProgress, onPause: () -> Unit, onCan
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Column(modifier = Modifier.weight(1f)) {
-                    Text("Sending to ${progress.peerName}", fontWeight = FontWeight.Bold, fontSize = 20.sp)
+                    Text(
+                        when (progress.phase) {
+                            SendPhase.Preparing -> "Preparing files"
+                            SendPhase.WaitingForAcceptance -> "Waiting for acceptance"
+                            SendPhase.Canceling -> "Canceling send..."
+                            SendPhase.Transferring -> "Sending to ${progress.peerName}"
+                        },
+                        fontWeight = FontWeight.Bold, fontSize = 20.sp
+                    )
                     Text(
                         "${progress.fileCount.coerceAtLeast(1)} file(s) • ${formatBytesApprox(progress.completedBytes)} / ${formatBytesApprox(progress.totalBytes)}",
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         fontSize = 13.sp
                     )
                 }
-                Text(
+                if (progress.phase == SendPhase.Transferring) Text(
                     formatTransferLine(progress.completedBytes, progress.totalBytes, progress.speedMbps),
                     color = MaterialTheme.colorScheme.primary,
                     fontWeight = FontWeight.Bold,
@@ -4622,10 +4663,12 @@ private fun SendProgressPanel(progress: SendProgress, onPause: () -> Unit, onCan
                 }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                FilledTonalButton(onClick = onPause, modifier = Modifier.weight(1f)) {
-                    Text(if (progress.active) "Pause" else "Resume")
+                if (progress.phase == SendPhase.Transferring) {
+                    FilledTonalButton(onClick = onPause, modifier = Modifier.weight(1f)) {
+                        Text(if (progress.active) "Pause" else "Resume")
+                    }
                 }
-                OutlinedButton(onClick = onCancel, modifier = Modifier.weight(1f)) {
+                OutlinedButton(onClick = onCancel, enabled = progress.phase != SendPhase.Canceling, modifier = Modifier.weight(1f)) {
                     Text("Cancel")
                 }
             }
@@ -5022,7 +5065,7 @@ private fun StagedItemsPanel(
                     when {
                         items.isEmpty() -> "Choose files"
                         connectedPeer == null -> "Choose a device"
-                        sendInFlight -> "Waiting for response"
+                        sendInFlight -> "Send in progress"
                         else -> "Send to ${connectedPeer.name}"
                     },
                     maxLines = 1,
@@ -5248,7 +5291,6 @@ private fun SettingsScreen(
     networkDetails: ActiveNetworkDetails,
     showLogs: Boolean,
     logs: List<String>,
-    allFilesAccess: Boolean,
     trustedDeviceIps: List<String>,
     vpnPeers: List<VpnSavedPeer> = emptyList(),
     trustedDeviceIds: Set<String> = emptySet(),
@@ -5270,7 +5312,6 @@ private fun SettingsScreen(
     onThemeModeChange: (ThemeMode) -> Unit,
     onAppLanguageChange: (AppLanguage) -> Unit,
     onConcurrentFileStreamsChange: (Int) -> Unit,
-    onManageAllFiles: () -> Unit,
     onRefreshDiscovery: () -> Unit,
     onLoadLogs: () -> Unit,
     onOpenHotspotSettings: () -> Unit,
@@ -5673,13 +5714,6 @@ private fun SettingsScreen(
                 )
                 SettingsDivider()
                 SettingsActionRow(
-                    icon = Icons.Rounded.Folder,
-                    title = "All files access",
-                    value = if (allFilesAccess) "Enabled" else "Enable",
-                    onClick = onManageAllFiles
-                )
-                SettingsDivider()
-                SettingsActionRow(
                     icon = Icons.Rounded.Lan,
                     title = "Network logs",
                     value = if (showLogs) "Hide" else "Load",
@@ -5935,8 +5969,91 @@ private fun SettingsScreen(
                 }
             }
         }
+        AboutLinksCard()
         if (showLogs) {
             LogsPanel(logs = logs)
+        }
+    }
+}
+
+@Composable
+private fun AboutLinksCard() {
+    val context = LocalContext.current
+    val uriHandler = LocalUriHandler.current
+    val browserErrorMessage = localizeAppText("Could not open this link.")
+    val appVersion = remember(context) {
+        context.packageManager.getPackageInfo(context.packageName, 0).versionName.orEmpty()
+    }
+    fun openLink(url: String) {
+        runCatching { uriHandler.openUri(url) }.onFailure { error ->
+            AppLog.add("Could not open app link: ${error.message}")
+            Toast.makeText(context, browserErrorMessage, Toast.LENGTH_LONG).show()
+        }
+    }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        shape = RoundedCornerShape(24.dp)
+    ) {
+        Column {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Text("About LanDrop", fontWeight = FontWeight.Bold, fontSize = 20.sp)
+                Text("Version $appVersion", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
+            }
+            SettingsLinkRow(
+                icon = {
+                    Icon(
+                        painter = painterResource(R.drawable.ic_github),
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(24.dp)
+                    )
+                },
+                title = "Source code",
+                supporting = "View on GitHub",
+                onClick = { openLink(context.getString(R.string.source_code_url)) }
+            )
+            SettingsDivider()
+            SettingsLinkRow(
+                icon = {
+                    Icon(Icons.Rounded.LaptopWindows, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                },
+                title = "Windows version",
+                supporting = "Installers and portable download",
+                onClick = { openLink(context.getString(R.string.windows_download_url)) }
+            )
+        }
+    }
+}
+
+@Composable
+private fun SettingsLinkRow(
+    icon: @Composable () -> Unit,
+    title: String,
+    supporting: String,
+    onClick: () -> Unit
+) {
+    Surface(onClick = onClick, modifier = Modifier.fillMaxWidth(), color = Color.Transparent) {
+        Row(
+            modifier = Modifier.padding(16.dp),
+            horizontalArrangement = Arrangement.spacedBy(14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            icon()
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(title, fontWeight = FontWeight.Bold)
+                Text(supporting, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
+            }
+            Icon(
+                Icons.AutoMirrored.Rounded.OpenInNew,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(20.dp)
+            )
         }
     }
 }

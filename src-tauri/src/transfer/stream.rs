@@ -11,6 +11,7 @@ use tokio::time::{sleep, Duration};
 
 use crate::app::{AppState, ParallelIncomingTransferSession};
 use crate::events;
+use crate::transfer::error::{PEER_CANCELED, USER_CANCELED};
 use crate::transfer::protocol::{
     read_message, write_message, ControlMessage, FileChunkAckMessage, FileChunkMessage,
     FileEndMessage, FileStartMessage, FlowControlReason, FlowControlState,
@@ -830,15 +831,7 @@ pub async fn receive_transfer_stream(
     cancel_flag: Arc<AtomicBool>,
     pause_flag: Arc<AtomicBool>,
 ) -> Result<String, String> {
-    let manifest = match read_message(stream).await? {
-        ControlMessage::TransferManifest(manifest) if manifest.transfer_id == transfer_id => {
-            manifest
-        }
-        ControlMessage::TransferManifest(_) => {
-            return Err("received a manifest for the wrong transfer".to_string());
-        }
-        _ => return Err("expected a transfer manifest after approval".to_string()),
-    };
+    let manifest = read_incoming_manifest(stream, transfer_id).await?;
 
     let destination_root = build_destination_root(Path::new(save_path), peer_name, transfer_id);
     fs::create_dir_all(&destination_root)
@@ -1097,15 +1090,7 @@ pub async fn receive_transfer_stream_framed_v2(
     cancel_flag: Arc<AtomicBool>,
     pause_flag: Arc<AtomicBool>,
 ) -> Result<String, String> {
-    let manifest = match read_message(stream).await? {
-        ControlMessage::TransferManifest(manifest) if manifest.transfer_id == transfer_id => {
-            manifest
-        }
-        ControlMessage::TransferManifest(_) => {
-            return Err("received a manifest for the wrong transfer".to_string());
-        }
-        _ => return Err("expected a transfer manifest after approval".to_string()),
-    };
+    let manifest = read_incoming_manifest(stream, transfer_id).await?;
 
     let destination_root = build_destination_root(Path::new(save_path), peer_name, transfer_id);
     fs::create_dir_all(&destination_root)
@@ -1473,12 +1458,18 @@ async fn receive_transfer_stream_framed_v2_parallel(
     )
     .await?;
 
-    loop {
-        match read_message(stream).await? {
-            ControlMessage::TransferComplete(done) if done.transfer_id == transfer_id => break,
+    let mut transfer_complete = false;
+    while let Some(message) =
+        next_parallel_completion_message(stream, &session, transfer_complete).await?
+    {
+        match message {
+            ControlMessage::TransferComplete(done) if done.transfer_id == transfer_id => {
+                transfer_complete = true;
+            }
             ControlMessage::TransferFlowControl(flow) if flow.transfer_id == transfer_id => {
                 if matches!(flow.state, FlowControlState::CancelRequested) {
-                    return Err("Transfer canceled by peer.".to_string());
+                    session.set_error(PEER_CANCELED.to_string()).await;
+                    return Err(PEER_CANCELED.to_string());
                 }
                 handle_peer_flow_control_for_receiver(
                     state,
@@ -1498,10 +1489,6 @@ async fn receive_transfer_stream_framed_v2_parallel(
         }
     }
 
-    if worker_count > 0 {
-        session.wait_finished().await?;
-    }
-
     emit_progress(
         state,
         app,
@@ -1512,6 +1499,259 @@ async fn receive_transfer_stream_framed_v2_parallel(
         session.started_at_ms,
     )
     .await
+}
+
+async fn read_incoming_manifest(
+    stream: &mut TcpStream,
+    transfer_id: &str,
+) -> Result<TransferManifestMessage, String> {
+    match read_message(stream).await? {
+        ControlMessage::TransferManifest(manifest) if manifest.transfer_id == transfer_id => {
+            Ok(manifest)
+        }
+        ControlMessage::TransferFlowControl(flow)
+            if flow.transfer_id == transfer_id
+                && matches!(flow.state, FlowControlState::CancelRequested) =>
+        {
+            Err(PEER_CANCELED.to_string())
+        }
+        ControlMessage::TransferManifest(_) => {
+            Err("received a manifest for the wrong transfer".to_string())
+        }
+        _ => Err("expected a transfer manifest after approval".to_string()),
+    }
+}
+
+/// The completion frame and workers use separate TCP connections. Keep reading
+/// the control channel while workers flush files, so their EOF cannot hide a
+/// cancellation, including when the displayed byte count has already hit 100%.
+async fn next_parallel_completion_message(
+    stream: &mut TcpStream,
+    session: &ParallelIncomingTransferSession,
+    transfer_complete: bool,
+) -> Result<Option<ControlMessage>, String> {
+    let mut byte = [0u8; 1];
+    tokio::select! {
+        biased;
+        _ = async {
+            while !session.cancel_flag.load(Ordering::SeqCst) {
+                sleep(Duration::from_millis(50)).await;
+            }
+        } => {
+            let _ = notify_peer_cancel(stream, &session.transfer_id).await;
+            Err(USER_CANCELED.to_string())
+        }
+        readable = stream.peek(&mut byte) => {
+            // Only peek participates in select; never abandon a partial frame
+            // when the last worker finishes at the same instant.
+            let message = match readable {
+                Ok(_) => tokio::time::timeout(Duration::from_secs(5), read_message(stream)).await
+                    .map_err(|_| "Peer did not finish the control message.".to_string())?,
+                Err(error) => Err(error.to_string()),
+            };
+            match message {
+                Ok(message) => Ok(Some(message)),
+                Err(error) => Err(session.error().await.filter(|error| error == PEER_CANCELED).unwrap_or(error)),
+            }
+        }
+        finished = session.wait_finished(), if transfer_complete => {
+            match finished {
+                // Socket readiness may be delivered one scheduler turn after
+                // the worker notification, even when Cancel is already in flight.
+                Ok(()) => peek_then_read_message(stream, 25).await,
+                Err(error) if error == PEER_CANCELED => Err(error),
+                Err(error) => Err(prefer_peer_cancel(stream, &session.transfer_id, error).await),
+            }
+        }
+    }
+}
+
+pub(super) async fn prefer_peer_cancel(
+    stream: &mut TcpStream,
+    transfer_id: &str,
+    error: String,
+) -> String {
+    // A worker's EOF may arrive slightly ahead of Cancel on the control socket.
+    // Give that explicit message a bounded chance to arrive; a real disconnect
+    // without Cancel remains a failure.
+    let next = tokio::time::timeout(Duration::from_millis(500), async {
+        let mut byte = [0u8; 1];
+        stream
+            .peek(&mut byte)
+            .await
+            .map_err(|error| error.to_string())?;
+        read_message(stream).await
+    })
+    .await;
+    match next {
+        Ok(Ok(ControlMessage::TransferFlowControl(flow)))
+            if flow.transfer_id == transfer_id
+                && matches!(flow.state, FlowControlState::CancelRequested) =>
+        {
+            PEER_CANCELED.to_string()
+        }
+        _ => error,
+    }
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+    use tokio::net::TcpListener;
+    use tokio::time::timeout;
+
+    async fn connected_pair() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let sender = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (receiver, _) = listener.accept().await.unwrap();
+        (sender, receiver)
+    }
+
+    fn session(workers: usize) -> Arc<ParallelIncomingTransferSession> {
+        Arc::new(ParallelIncomingTransferSession::new(
+            "test-cancel".into(),
+            PathBuf::from("unused"),
+            1600,
+            1600,
+            workers,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        ))
+    }
+
+    fn cancel_message(transfer_id: &str) -> ControlMessage {
+        ControlMessage::TransferFlowControl(TransferFlowControlMessage::new(
+            transfer_id.into(),
+            FlowControlState::CancelRequested,
+            FlowControlReason::User,
+        ))
+    }
+
+    #[tokio::test]
+    async fn worker_eof_waits_for_sender_cancel_on_the_control_socket() {
+        let (mut sender, mut receiver) = connected_pair().await;
+        let session = session(1);
+        session.set_error("early eof".into()).await;
+        session.mark_worker_finished();
+        let task = tokio::spawn(async move {
+            next_parallel_completion_message(&mut receiver, &session, true).await
+        });
+        // Simulate independent worker and control connections arriving out of order.
+        sleep(Duration::from_millis(30)).await;
+        write_message(&mut sender, &cancel_message("test-cancel"))
+            .await
+            .unwrap();
+        assert_eq!(
+            timeout(Duration::from_secs(1), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap_err(),
+            PEER_CANCELED
+        );
+    }
+
+    #[tokio::test]
+    async fn queued_cancel_wins_even_when_all_workers_have_finished() {
+        let (mut sender, mut receiver) = connected_pair().await;
+        write_message(&mut sender, &cancel_message("test-cancel"))
+            .await
+            .unwrap();
+        let result = next_parallel_completion_message(&mut receiver, &session(0), true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(result, ControlMessage::TransferFlowControl(flow)
+            if matches!(flow.state, FlowControlState::CancelRequested)));
+    }
+
+    #[tokio::test]
+    async fn worker_completion_does_not_interrupt_a_fragmented_control_frame() {
+        let (mut sender, mut receiver) = connected_pair().await;
+        let session = session(1);
+        let task_session = session.clone();
+        let payload = serde_json::to_vec(&cancel_message("test-cancel")).unwrap();
+        let mut frame = (payload.len() as u32).to_be_bytes().to_vec();
+        frame.extend(payload);
+        sender.write_all(&frame[..2]).await.unwrap();
+        let task = tokio::spawn(async move {
+            next_parallel_completion_message(&mut receiver, &task_session, true).await
+        });
+        tokio::task::yield_now().await;
+        session.mark_worker_finished();
+        sender.write_all(&frame[2..]).await.unwrap();
+        let result = timeout(Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(matches!(result, ControlMessage::TransferFlowControl(flow)
+            if matches!(flow.state, FlowControlState::CancelRequested)));
+    }
+
+    #[tokio::test]
+    async fn worker_disconnect_without_cancel_stays_a_failure() {
+        let (sender, mut receiver) = connected_pair().await;
+        let session = session(1);
+        session.set_error("early eof".into()).await;
+        session.mark_worker_finished();
+        let task = tokio::spawn(async move {
+            next_parallel_completion_message(&mut receiver, &session, true).await
+        });
+        sleep(Duration::from_millis(30)).await;
+        drop(sender);
+        let error = timeout(Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(
+            crate::transfer::error::transfer_error_message(error, false),
+            crate::transfer::error::PEER_DISCONNECTED
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_worker_cancel_is_not_replaced_by_an_earlier_eof() {
+        let (sender, mut receiver) = connected_pair().await;
+        let session = session(1);
+        session.set_error("early eof".into()).await;
+        session.set_error(PEER_CANCELED.into()).await;
+        drop(sender);
+        let error = next_parallel_completion_message(&mut receiver, &session, false)
+            .await
+            .unwrap_err();
+        assert_eq!(error, PEER_CANCELED);
+    }
+
+    #[tokio::test]
+    async fn cancel_after_acceptance_before_manifest_has_the_correct_reason() {
+        let (mut sender, mut receiver) = connected_pair().await;
+        write_message(&mut sender, &cancel_message("test-cancel"))
+            .await
+            .unwrap();
+        assert_eq!(
+            read_incoming_manifest(&mut receiver, "test-cancel")
+                .await
+                .unwrap_err(),
+            PEER_CANCELED
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_for_another_transfer_does_not_mask_a_worker_error() {
+        let (mut sender, mut receiver) = connected_pair().await;
+        write_message(&mut sender, &cancel_message("other-transfer"))
+            .await
+            .unwrap();
+        assert_eq!(
+            prefer_peer_cancel(&mut receiver, "test-cancel", "disk full".into()).await,
+            "disk full"
+        );
+    }
 }
 
 #[allow(dead_code)]
@@ -2140,11 +2380,7 @@ async fn wait_while_paused_with_peer_notice(
                     continue;
                 };
                 if ack.transfer_id == transfer_id {
-                    let _ = apply_pending_chunk_ack(
-                        pending_acks,
-                        &ack.relative_path,
-                        ack.sequence,
-                    );
+                    let _ = apply_pending_chunk_ack(pending_acks, &ack.relative_path, ack.sequence);
                 }
             }
             Some(ControlMessage::TransferFlowControl(flow)) if flow.transfer_id == transfer_id => {
@@ -2303,9 +2539,7 @@ fn apply_pending_chunk_ack(
     // same path. This stays correct on a single TCP stream and survives
     // pause/resume races where a duplicate or slightly-reordered ACK would
     // previously fail the whole transfer with "wrong chunk".
-    pending.retain(|entry| {
-        entry.relative_path != relative_path || entry.sequence > sequence
-    });
+    pending.retain(|entry| entry.relative_path != relative_path || entry.sequence > sequence);
     pending.len() < before
 }
 
@@ -2547,9 +2781,7 @@ async fn apply_ack_or_flow_control_message(
                     Ok(consumed_ack || pending.is_empty())
                 }
                 FlowControlState::Resumed => Ok(false),
-                FlowControlState::CancelRequested => {
-                    Err("Transfer canceled by peer.".to_string())
-                }
+                FlowControlState::CancelRequested => Err("Transfer canceled by peer.".to_string()),
             }
         }
         ControlMessage::TransferFlowControl(_) => {

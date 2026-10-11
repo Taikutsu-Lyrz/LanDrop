@@ -1,3 +1,5 @@
 <resources>
     <string name="app_name">LanDrop</string>
+    <string name="source_code_url" translatable="false">https://github.com/Taikutsu-Lyrz/LanDrop</string>
+    <string name="windows_download_url" translatable="false">https://github.com/Taikutsu-Lyrz/LanDrop/releases</string>
 </resources>

@@ -4,6 +4,10 @@
   "language": "دری",
   "direction": "rtl",
   "shared": {
+    "Transfer canceled by peer.": "انتقال توسط دستگاه مقابل لغو شد.",
+    "Peer disconnected before the transfer finished.": "اتصال دستگاه مقابل پیش از پایان انتقال قطع شد.",
+    "Waiting for acceptance": "در انتظار پذیرش",
+    "Transfer canceled by sender before acceptance.": "انتقال پیش از پذیرش توسط فرستنده لغو شد.",
     "Receive": "دریافت",
     "Send": "ارسال",
     "Settings": "تنظیمات",

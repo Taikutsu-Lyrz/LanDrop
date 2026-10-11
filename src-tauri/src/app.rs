@@ -37,6 +37,7 @@ struct AppStateInner {
     device_id: String,
     instance_id: String,
     persistence_path: RwLock<Option<PathBuf>>,
+    persistence_write_lock: AsyncMutex<()>,
     discovery_tx: Mutex<Option<mpsc::UnboundedSender<discovery::service::DiscoveryCommand>>>,
     pending_incoming: AsyncMutex<HashMap<String, oneshot::Sender<IncomingTransferDecision>>>,
     active_transfer_cancels: AsyncMutex<HashMap<String, Arc<AtomicBool>>>,
@@ -95,10 +96,16 @@ impl ParallelIncomingTransferSession {
 
     pub async fn set_error(&self, error: String) {
         let mut slot = self.error.lock().await;
-        if slot.is_none() {
+        // An explicit peer cancellation takes precedence over workers closing
+        // their sockets, which may be observed on another task first.
+        if slot.is_none() || error == transfer::error::PEER_CANCELED {
             *slot = Some(error);
         }
         self.notify.notify_waiters();
+    }
+
+    pub async fn error(&self) -> Option<String> {
+        self.error.lock().await.clone()
     }
 
     pub fn mark_worker_finished(&self) {
@@ -109,13 +116,16 @@ impl ParallelIncomingTransferSession {
 
     pub async fn wait_finished(&self) -> Result<(), String> {
         loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             if let Some(error) = self.error.lock().await.clone() {
                 return Err(error);
             }
             if self.remaining_workers.load(Ordering::SeqCst) == 0 {
                 return Ok(());
             }
-            self.notify.notified().await;
+            notified.await;
         }
     }
 }
@@ -145,6 +155,7 @@ impl AppState {
                 device_id: Uuid::new_v4().to_string(),
                 instance_id: Uuid::new_v4().to_string(),
                 persistence_path: RwLock::new(None),
+                persistence_write_lock: AsyncMutex::new(()),
                 discovery_tx: Mutex::new(None),
                 pending_incoming: AsyncMutex::new(HashMap::new()),
                 active_transfer_cancels: AsyncMutex::new(HashMap::new()),
@@ -601,6 +612,19 @@ impl AppState {
         *self.inner.incoming_offer.write().await = offer;
     }
 
+    pub async fn clear_incoming_offer(&self, transfer_id: &str) -> bool {
+        let mut offer = self.inner.incoming_offer.write().await;
+        if offer
+            .as_ref()
+            .is_some_and(|offer| offer.transfer_id == transfer_id)
+        {
+            *offer = None;
+            true
+        } else {
+            false
+        }
+    }
+
     pub async fn register_pending_incoming(
         &self,
         transfer_id: String,
@@ -681,14 +705,18 @@ impl AppState {
             if is_terminal && next_is_active {
                 return;
             }
-            // Cancel wins over a later failed/receipt race.
+            // Cancel wins over late worker errors and completion/receipt races.
             if matches!(summary.status, TransferStatus::Canceled)
-                && matches!(status, TransferStatus::Failed)
+                && !matches!(status, TransferStatus::Canceled)
             {
                 return;
             }
             summary.status = status;
             summary.current_file = current_file;
+            if !next_is_active {
+                summary.speed_mbps = None;
+                summary.eta_seconds = None;
+            }
         }
         drop(transfers);
         self.persist_state_background();
@@ -707,6 +735,15 @@ impl AppState {
             .iter_mut()
             .find(|item| item.transfer_id == transfer_id)
         {
+            if matches!(
+                summary.status,
+                TransferStatus::Completed
+                    | TransferStatus::Failed
+                    | TransferStatus::Rejected
+                    | TransferStatus::Canceled
+            ) {
+                return;
+            }
             summary.completed_bytes = completed_bytes;
             summary.progress_pct = if summary.total_bytes == 0 {
                 100.0
@@ -903,6 +940,10 @@ impl AppState {
     }
 
     async fn persist_state_snapshot(&self) -> Result<(), String> {
+        // Status and cleanup both request saves. Serialize the snapshot reads
+        // and writes so their shared temporary file cannot collide or restore
+        // an older awaiting/active status over the cancellation.
+        let _write_guard = self.inner.persistence_write_lock.lock().await;
         let path = self
             .inner
             .persistence_path
@@ -982,4 +1023,145 @@ fn default_device_name() -> String {
     }
 
     "This PC".to_string()
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+    use crate::transfer::error::PEER_CANCELED;
+    use crate::types::TransferDirection;
+
+    #[tokio::test]
+    async fn concurrent_history_saves_keep_the_canceled_status() {
+        let state = AppState::new();
+        let folder = std::env::temp_dir().join(format!("landrop-cancel-test-{}", Uuid::new_v4()));
+        let path = folder.join("state.json");
+        *state.inner.persistence_path.write().await = Some(path.clone());
+        state.inner.transfers.write().await.push(TransferSummary {
+            transfer_id: "test-save".into(),
+            peer_name: "Phone".into(),
+            direction: TransferDirection::Incoming,
+            status: TransferStatus::Canceled,
+            file_count: 1,
+            total_bytes: 1600,
+            completed_bytes: 1600,
+            progress_pct: 100.0,
+            current_file: Some(PEER_CANCELED.into()),
+            speed_mbps: None,
+            eta_seconds: None,
+        });
+        let mut tasks = vec![];
+        for _ in 0..20 {
+            let task_state = state.clone();
+            tasks.push(tokio::spawn(async move {
+                task_state.persist_state_snapshot().await
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap().unwrap();
+        }
+        let saved = persistence::load_state(&path).unwrap().unwrap();
+        assert!(matches!(
+            saved.transfers[0].status,
+            TransferStatus::Canceled
+        ));
+        assert_eq!(
+            saved.transfers[0].current_file.as_deref(),
+            Some(PEER_CANCELED)
+        );
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(folder).unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancel_message_survives_late_progress_errors_and_completion() {
+        let state = AppState::new();
+        state
+            .upsert_transfer(TransferSummary {
+                transfer_id: "test-cancel".into(),
+                peer_name: "Phone".into(),
+                direction: TransferDirection::Incoming,
+                status: TransferStatus::Transferring,
+                file_count: 6,
+                total_bytes: 1600,
+                completed_bytes: 1600,
+                progress_pct: 100.0,
+                current_file: Some("photo.jpg".into()),
+                speed_mbps: Some(10.33),
+                eta_seconds: Some(0),
+            })
+            .await;
+        state
+            .set_transfer_status(
+                "test-cancel",
+                TransferStatus::Canceled,
+                Some(PEER_CANCELED.into()),
+            )
+            .await;
+        state
+            .update_transfer_progress(
+                "test-cancel",
+                1600,
+                Some("photo.jpg".into()),
+                Some(20.0),
+                Some(0),
+            )
+            .await;
+        state
+            .set_transfer_status(
+                "test-cancel",
+                TransferStatus::Failed,
+                Some("early eof".into()),
+            )
+            .await;
+        state
+            .set_transfer_status(
+                "test-cancel",
+                TransferStatus::Completed,
+                Some("Saved".into()),
+            )
+            .await;
+        let transfer = state.transfers().await.remove(0);
+        assert!(matches!(transfer.status, TransferStatus::Canceled));
+        assert_eq!(transfer.current_file.as_deref(), Some(PEER_CANCELED));
+        assert_eq!(transfer.completed_bytes, 1600);
+        assert!(transfer.speed_mbps.is_none());
+        assert!(transfer.eta_seconds.is_none());
+    }
+
+    #[tokio::test]
+    async fn canceled_offer_cannot_be_accepted_and_cannot_clear_a_newer_offer() {
+        let state = AppState::new();
+        let _decision_rx = state.register_pending_incoming("old".into()).await;
+        state.cancel_pending_incoming("old").await;
+        assert!(state
+            .respond_to_pending_incoming(
+                "old",
+                IncomingTransferDecision {
+                    accept: true,
+                    save_path: Some("unused".into()),
+                }
+            )
+            .await
+            .is_err());
+        state
+            .set_incoming_offer(Some(IncomingTransferOffer {
+                transfer_id: "new".into(),
+                sender_device_id: "phone".into(),
+                sender_name: "Phone".into(),
+                file_count: 1,
+                directory_count: 0,
+                total_bytes: 1,
+                requires_pair_code: false,
+                top_level_items: vec![],
+            }))
+            .await;
+        assert!(!state.clear_incoming_offer("old").await);
+        assert_eq!(
+            state.bootstrap().await.incoming_offer.unwrap().transfer_id,
+            "new"
+        );
+        assert!(state.clear_incoming_offer("new").await);
+        assert!(state.bootstrap().await.incoming_offer.is_none());
+    }
 }

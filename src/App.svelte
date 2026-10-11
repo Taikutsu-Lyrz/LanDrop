@@ -200,9 +200,10 @@
       }),
       listenIncomingTransfer((offer) => {
         incomingOffer = offer;
-        if (offer) {
+        dismissResolvedIncomingOffer();
+        if (incomingOffer) {
           currentView = "receive";
-          statusLine = `${offer.senderName} wants to send ${offer.fileCount} files.`;
+          statusLine = `${incomingOffer.senderName} wants to send ${incomingOffer.fileCount} files.`;
         }
       }),
       listenSendDraftUpdated((draft) => {
@@ -216,6 +217,7 @@
       }),
       listenTransfersUpdated((nextTransfers) => {
         transfers = nextTransfers;
+        dismissResolvedIncomingOffer();
         const latestTransfer = nextTransfers[0];
         if (latestTransfer) {
           statusLine = describeTransfer(latestTransfer);
@@ -600,25 +602,23 @@
 
     try {
       const savePath = settings?.defaultReceiveFolder ?? (await pickReceiveFolder());
+      // The sender may cancel while the folder picker is open.
+      if (incomingOffer?.transferId !== offer.transferId) {
+        return;
+      }
       if (!savePath) {
         statusLine = "Receive location was not selected.";
         return;
       }
 
       await respondToIncomingOffer(offer.transferId, true, savePath);
-      transfers = transfers.map((transfer) =>
-        transfer.transferId === offer.transferId
-          ? {
-              ...transfer,
-              status: "accepted",
-              currentFile: `Saving into ${savePath}`
-            }
-          : transfer
-      );
-      incomingOffer = null;
-      statusLine = `Receiving from ${offer.senderName}.`;
+      if (incomingOffer?.transferId === offer.transferId) {
+        incomingOffer = null;
+      }
     } catch (error) {
-      statusLine = unwrapError(error, "Unable to accept the transfer.");
+      if (incomingOffer?.transferId === offer.transferId) {
+        statusLine = unwrapError(error, "Unable to accept the transfer.");
+      }
     } finally {
       respondingToIncoming = false;
     }
@@ -634,19 +634,13 @@
 
     try {
       await respondToIncomingOffer(offer.transferId, false);
-      transfers = transfers.map((transfer) =>
-        transfer.transferId === offer.transferId
-          ? {
-              ...transfer,
-              status: "rejected",
-              currentFile: "Transfer rejected."
-            }
-          : transfer
-      );
-      incomingOffer = null;
-      statusLine = `Rejected transfer from ${offer.senderName}.`;
+      if (incomingOffer?.transferId === offer.transferId) {
+        incomingOffer = null;
+      }
     } catch (error) {
-      statusLine = unwrapError(error, "Unable to reject the transfer.");
+      if (incomingOffer?.transferId === offer.transferId) {
+        statusLine = unwrapError(error, "Unable to reject the transfer.");
+      }
     } finally {
       respondingToIncoming = false;
     }
@@ -1043,6 +1037,14 @@
     }
   }
 
+  function dismissResolvedIncomingOffer() {
+    if (incomingOffer && transfers.some((transfer) =>
+      transfer.transferId === incomingOffer?.transferId && transfer.status !== "awaiting_accept"
+    )) {
+      incomingOffer = null;
+    }
+  }
+
   function applyBootstrap(nextBootstrap: AppBootstrap) {
     localAdapters = nextBootstrap.localAdapters;
     devices = nextBootstrap.peers;
@@ -1051,6 +1053,7 @@
     settings = nextBootstrap.settings;
     deviceNameDraft = nextBootstrap.settings.deviceName;
     incomingOffer = nextBootstrap.incomingOffer;
+    dismissResolvedIncomingOffer();
     const previousHost = remotePublicHost;
     remoteAccessStatus = nextBootstrap.remoteAccessStatus;
     if (nextBootstrap.remoteAccessStatus.publicHost) {
@@ -1106,7 +1109,7 @@
   function transferStatusLabel(status: TransferSummary["status"]) {
     switch (status) {
       case "awaiting_accept":
-        return "Waiting";
+        return "Waiting for acceptance";
       case "accepted":
         return "Accepted";
       case "rejected":
@@ -1456,6 +1459,11 @@
                       </span>
                     </div>
                     <div class="inline-actions">
+                      {#if transfer.direction === "outgoing" && (transfer.status === "awaiting_accept" || transfer.status === "accepted")}
+                        <button class="soft-button" on:click={() => handleCancelTransfer(transfer.transferId)}>
+                          Cancel
+                        </button>
+                      {/if}
                       {#if transfer.status === "transferring"}
                         <button class="soft-button" on:click={() => handleTransferPause(transfer.transferId, true)}>
                           Pause
@@ -1562,6 +1570,11 @@
                       </span>
                     </div>
                   <div class="inline-actions">
+                    {#if transfer.direction === "outgoing" && (transfer.status === "awaiting_accept" || transfer.status === "accepted")}
+                      <button class="soft-button" on:click={() => handleCancelTransfer(transfer.transferId)}>
+                        Cancel
+                      </button>
+                    {/if}
                     {#if transfer.status === "transferring"}
                       <button class="soft-button" on:click={() => handleTransferPause(transfer.transferId, true)}>
                         Pause
