@@ -58,6 +58,7 @@ internal class AndroidReceiver(
     private val onProgress: (ReceiveProgress?) -> Unit,
     private val onStatus: (String) -> Unit
 ) {
+    private val receiveRootNames = ConcurrentHashMap<Uri, String>()
     private val running = AtomicBoolean(false)
     private val transferBusy = AtomicBoolean(false)
     private val cancelCurrent = AtomicBoolean(false)
@@ -669,8 +670,15 @@ internal class AndroidReceiver(
         val totalBytes = manifest.optLong("totalBytes")
         val manifestFileCount = (0 until entries.length())
             .count { index -> entries.optJSONObject(index)?.optString("kind") == "file" }
-        val rootDocumentId = DocumentsContract.getTreeDocumentId(saveTreeUri)
-        val rootUri = DocumentsContract.buildDocumentUriUsingTree(saveTreeUri, rootDocumentId)
+        val rootUri = if (saveTreeUri.toString() == DOWNLOADS_DESTINATION) saveTreeUri else
+            DocumentsContract.buildDocumentUriUsingTree(saveTreeUri, DocumentsContract.getTreeDocumentId(saveTreeUri))
+        if (saveTreeUri.toString() != DOWNLOADS_DESTINATION) {
+            // Provider document IDs can be opaque; use the actual selected folder name.
+            receiveRootNames[saveTreeUri] = context.contentResolver.query(
+                rootUri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null
+            )?.use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null }
+                ?: DocumentsContract.getTreeDocumentId(saveTreeUri).substringAfterLast('/').substringAfter(':')
+        }
         val createdDirs = mutableMapOf<String, Uri>("" to rootUri)
         val resumeFiles = JSONArray()
         for (index in 0 until entries.length()) {
@@ -1227,8 +1235,11 @@ internal class AndroidReceiver(
         createdDirs: MutableMap<String, Uri>,
         relativePath: String
     ): Uri {
+        if (android.os.Build.VERSION.SDK_INT >= 29 && treeUri.toString() == DOWNLOADS_DESTINATION)
+            return DownloadsDestination(context).createPartial(relativePath, categoryFor(relativePath))
         val category = categoryFor(relativePath)
-        val parts = listOf("LanDrop", category) + relativePath.split('/').filter { it.isNotBlank() }
+        val rootName = receiveRootNames[treeUri] ?: DocumentsContract.getTreeDocumentId(treeUri).substringAfterLast('/').substringAfter(':')
+        val parts = receivePathParts(relativePath, category, rootName)
         var parentKey = ""
         var parentUri = createdDirs.getValue("")
         parts.dropLast(1).forEach { rawSegment ->
@@ -1258,6 +1269,8 @@ internal class AndroidReceiver(
         createdDirs: MutableMap<String, Uri>,
         relativePath: String
     ): Uri? {
+        if (android.os.Build.VERSION.SDK_INT >= 29 && treeUri.toString() == DOWNLOADS_DESTINATION)
+            return DownloadsDestination(context).findPartial(relativePath, categoryFor(relativePath))
         val parentUri = ensureParentDirectory(treeUri, createdDirs, relativePath)
         return findChildByName(treeUri, parentUri, partialName(sanitizeName(relativePath.substringAfterLast('/'))))
     }
@@ -1268,6 +1281,10 @@ internal class AndroidReceiver(
         relativePath: String,
         partialUri: Uri
     ) {
+        if (android.os.Build.VERSION.SDK_INT >= 29 && treeUri.toString() == DOWNLOADS_DESTINATION) {
+            DownloadsDestination(context).finish(partialUri, relativePath, categoryFor(relativePath))
+            return
+        }
         val finalName = sanitizeName(relativePath.substringAfterLast('/'))
         DocumentsContract.renameDocument(context.contentResolver, partialUri, finalName)
             ?: error("Could not finalize $relativePath")
@@ -1279,7 +1296,8 @@ internal class AndroidReceiver(
         relativePath: String
     ): Uri {
         val category = categoryFor(relativePath)
-        val parts = listOf("LanDrop", category) + relativePath.split('/').filter { it.isNotBlank() }
+        val rootName = receiveRootNames[treeUri] ?: DocumentsContract.getTreeDocumentId(treeUri).substringAfterLast('/').substringAfter(':')
+        val parts = receivePathParts(relativePath, category, rootName)
         var parentKey = ""
         var parentUri = createdDirs.getValue("")
         parts.dropLast(1).forEach { rawSegment ->
@@ -1321,15 +1339,7 @@ internal class AndroidReceiver(
         return null
     }
 
-    private fun documentSize(uri: Uri): Long {
-        context.contentResolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { cursor ->
-            val sizeIndex = cursor.getColumnIndex(OpenableColumns.SIZE)
-            if (sizeIndex >= 0 && cursor.moveToFirst() && !cursor.isNull(sizeIndex)) {
-                return cursor.getLong(sizeIndex)
-            }
-        }
-        return 0L
-    }
+    private fun documentSize(uri: Uri): Long = documentByteSize(context.contentResolver, uri)
 
     private fun partialName(fileName: String): String = "$fileName.landrop.part"
 

@@ -1,0 +1,370 @@
+{
+  "Receive paused.": [
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:186",
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:486"
+  ],
+  "Received flow control for the wrong transfer.": [
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:205"
+  ],
+  "Received a file for the wrong transfer.": [
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:258"
+  ],
+  "Partial file size mismatch for $relativePath.": [
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:268",
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:791",
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:1078"
+  ],
+  "Could not open $relativePath for writing.": [
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:276"
+  ],
+  "Received a chunk for the wrong transfer.": [
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:282"
+  ],
+  "Received chunk before file start.": [
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:284"
+  ],
+  "Received chunk without an open file.": [
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:285"
+  ],
+  "Unexpected chunk offset for $relativePath.": [
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:290",
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:1100"
+  ],
+  "Chunk exceeds remaining file size for $relativePath.": [
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:293"
+  ],
+  "Received file end before file start.": [
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:352"
+  ],
+  "Received file end without an output file.": [
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:353"
+  ],
+  "Received incomplete file $relativePath.": [
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:359"
+  ],
+  "Received $relativePath": [
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:367",
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:834",
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:1173"
+  ],
+  "Received completion for the wrong transfer.": [
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:371"
+  ],
+  "Transfer completed before the active file was finalized.": [
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:374"
+  ],
+  "Saved on Android.": [
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:378",
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:844",
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:942"
+  ],
+  "Received files from $sender.": [
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:380",
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:848",
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:943"
+  ],
+  "this side is paused": [
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:464"
+  ],
+  "Requested sender resume.": [
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:485"
+  ],
+  "Receive resumed.": [
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:487"
+  ],
+  "Android is busy with another transfer.": [
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:532"
+  ],
+  "Unexpected TCP message: $first": [
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:560"
+  ],
+  "Unexpected LAN message: $first": [
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:561"
+  ],
+  "Pair code required or invalid.": [
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:599",
+    "src/lib/api/commands.ts:455"
+  ],
+  "Rejected transfer from $sender: pair code required.": [
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:600"
+  ],
+  "Transfer request timed out. Send again.": [
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:626"
+  ],
+  "Rejected on Android.": [
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:627"
+  ],
+  "Choose a save folder before receiving.": [
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:640",
+    "android/app/src/main/java/dev/landrop/mobile/ReceiveDestination.kt:11"
+  ],
+  "$sender is sending files...": [
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:648"
+  ],
+  "Receiver expected a manifest.": [
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:665"
+  ],
+  "Preparing ${manifestFileCount} file(s)": [
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:723"
+  ],
+  "Unexpected transfer frame.": [
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:854"
+  ],
+  "No active Android parallel receive session.": [
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:881"
+  ],
+  "Android worker failed.": [
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:903"
+  ],
+  "Parallel worker $workerId failed: $message": [
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:905"
+  ],
+  "Transfer canceled.": [
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:912"
+  ],
+  "Missing Android parallel session.": [
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:928"
+  ],
+  "Canceled by peer.": [
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:954"
+  ],
+  "Unexpected parallel control frame.": [
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:977"
+  ],
+  "${session.sender} paused the transfer.": [
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:1046",
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:1198"
+  ],
+  "Worker received a file for the wrong transfer.": [
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:1066"
+  ],
+  "Could not open output for $relativePath.": [
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:1081"
+  ],
+  "Chunk before file start.": [
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:1090"
+  ],
+  "Worker received a chunk for the wrong file.": [
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:1094"
+  ],
+  "File end before file start.": [
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:1160"
+  ],
+  "Missing partial file.": [
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:1161"
+  ],
+  "Incomplete file $relativePath.": [
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:1166"
+  ],
+  "Worker completion did not match this Android worker.": [
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:1183"
+  ],
+  "${session.sender} resumed the transfer.": [
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:1207"
+  ],
+  "Unexpected Android worker frame.": [
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:1211"
+  ],
+  "Could not create $segment": [
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:1243",
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:1296"
+  ],
+  "Could not create $fileName": [
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:1253"
+  ],
+  "Could not finalize $relativePath": [
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:1273"
+  ],
+  "Invalid control size.": [
+    "android/app/src/main/java/dev/landrop/mobile/AndroidReceiver.kt:1417"
+  ],
+  "Could not retain selected file access: ${error.message}": [
+    "android/app/src/main/java/dev/landrop/mobile/MainActivity.kt:726"
+  ],
+  "${pickedItems.size} file(s) selected.": [
+    "android/app/src/main/java/dev/landrop/mobile/MainActivity.kt:738"
+  ],
+  "Folder selected.": [
+    "android/app/src/main/java/dev/landrop/mobile/MainActivity.kt:757"
+  ],
+  "Could not keep access to this folder. Choose it again.": [
+    "android/app/src/main/java/dev/landrop/mobile/MainActivity.kt:771"
+  ],
+  "Could not send files": [
+    "android/app/src/main/java/dev/landrop/mobile/MainActivity.kt:1226"
+  ],
+  "Could not receive files": [
+    "android/app/src/main/java/dev/landrop/mobile/MainActivity.kt:1236"
+  ],
+  "Send failed": [
+    "android/app/src/main/java/dev/landrop/mobile/MainActivity.kt:1734"
+  ],
+  "Send failed: ${result.message}": [
+    "android/app/src/main/java/dev/landrop/mobile/MainActivity.kt:1741",
+    "android/app/src/main/java/dev/landrop/mobile/MainActivity.kt:1742"
+  ],
+  "Worker $index: ${failure.message ?: failure.javaClass.simpleName}": [
+    "android/app/src/main/java/dev/landrop/mobile/MainActivity.kt:2828"
+  ],
+  "Selected-file access denied for ${file.relativePath}": [
+    "android/app/src/main/java/dev/landrop/mobile/MainActivity.kt:3514"
+  ],
+  "Android denied access to ${file.relativePath}. Select it again with the file picker.": [
+    "android/app/src/main/java/dev/landrop/mobile/MainActivity.kt:3516"
+  ],
+  "Android's file picker gives LanDrop access only to the files and folders you choose.": [
+    "android/app/src/main/java/dev/landrop/mobile/MainActivity.kt:3669"
+  ],
+  "Choose what to share": [
+    "android/app/src/main/java/dev/landrop/mobile/MainActivity.kt:3673"
+  ],
+  "Select files or folders with Android's file picker. LanDrop streams them directly without ZIP archives or temporary copies.": [
+    "android/app/src/main/java/dev/landrop/mobile/MainActivity.kt:3674"
+  ],
+  "Choose a save folder": [
+    "android/app/src/main/java/dev/landrop/mobile/MainActivity.kt:3678"
+  ],
+  "Select where incoming files will be saved. You can change this folder later on the Receive screen.": [
+    "android/app/src/main/java/dev/landrop/mobile/MainActivity.kt:3679"
+  ],
+  "Save incoming files": [
+    "android/app/src/main/java/dev/landrop/mobile/MainActivity.kt:3743"
+  ],
+  "Android grants LanDrop access only to the receive folder you select.": [
+    "android/app/src/main/java/dev/landrop/mobile/MainActivity.kt:3745"
+  ],
+  "Choose a save folder to accept this transfer.": [
+    "android/app/src/main/java/dev/landrop/mobile/MainActivity.kt:3837"
+  ],
+  "Save to $saveFolderName": [
+    "android/app/src/main/java/dev/landrop/mobile/MainActivity.kt:3840"
+  ],
+  "Preparing files": [
+    "android/app/src/main/java/dev/landrop/mobile/MainActivity.kt:4652"
+  ],
+  "Send in progress": [
+    "android/app/src/main/java/dev/landrop/mobile/MainActivity.kt:5093"
+  ],
+  "About LanDrop": [
+    "android/app/src/main/java/dev/landrop/mobile/MainActivity.kt:5361",
+    "android/app/src/main/java/dev/landrop/mobile/MainActivity.kt:5612",
+    "android/app/src/main/java/dev/landrop/mobile/MainActivity.kt:6274"
+  ],
+  "Stop Wi-Fi Direct": [
+    "android/app/src/main/java/dev/landrop/mobile/MainActivity.kt:6065"
+  ],
+  "${peer.ip}:${peer.port} • ${peer.linkLabel}": [
+    "android/app/src/main/java/dev/landrop/mobile/MainActivity.kt:6124"
+  ],
+  "Could not open this link.": [
+    "android/app/src/main/java/dev/landrop/mobile/MainActivity.kt:6253"
+  ],
+  "Version $appVersion": [
+    "android/app/src/main/java/dev/landrop/mobile/MainActivity.kt:6275"
+  ],
+  "Source code": [
+    "android/app/src/main/java/dev/landrop/mobile/MainActivity.kt:6286"
+  ],
+  "View on GitHub": [
+    "android/app/src/main/java/dev/landrop/mobile/MainActivity.kt:6287"
+  ],
+  "Windows version": [
+    "android/app/src/main/java/dev/landrop/mobile/MainActivity.kt:6296"
+  ],
+  "Installers and portable download": [
+    "android/app/src/main/java/dev/landrop/mobile/MainActivity.kt:6297"
+  ],
+  "Save folder access was lost. Choose it again.": [
+    "android/app/src/main/java/dev/landrop/mobile/ReceiveDestination.kt:17"
+  ],
+  "Save folder is unavailable. Choose it again.": [
+    "android/app/src/main/java/dev/landrop/mobile/ReceiveDestination.kt:26",
+    "android/app/src/main/java/dev/landrop/mobile/ReceiveDestination.kt:28",
+    "android/app/src/main/java/dev/landrop/mobile/ReceiveDestination.kt:33"
+  ],
+  "This folder is read-only. Choose another save folder.": [
+    "android/app/src/main/java/dev/landrop/mobile/ReceiveDestination.kt:31"
+  ],
+  "Invalid approval control frame.": [
+    "android/app/src/main/java/dev/landrop/mobile/TransferApproval.kt:48"
+  ],
+  "Unexpected message while waiting for acceptance.": [
+    "android/app/src/main/java/dev/landrop/mobile/TransferApproval.kt:58"
+  ],
+  "Wi-Fi Direct pairing QR code": [
+    "android/app/src/main/java/dev/landrop/mobile/WifiDirectQr.kt:132"
+  ],
+  "Leaving current Wi-Fi for the direct link...": [
+    "android/app/src/main/java/dev/landrop/mobile/WifiDirectTransport.kt:289"
+  ],
+  "Could not reset the previous Wi-Fi Direct group. Tap Stop Wi-Fi Direct, or turn Wi-Fi off and on, then retry.": [
+    "android/app/src/main/java/dev/landrop/mobile/WifiDirectTransport.kt:317"
+  ],
+  "Could not release the previous Wi-Fi Direct group: ${connectFailure(reason)}": [
+    "android/app/src/main/java/dev/landrop/mobile/WifiDirectTransport.kt:340"
+  ],
+  "Could not reset Wi-Fi Direct. Tap Stop Wi-Fi Direct and retry.": [
+    "android/app/src/main/java/dev/landrop/mobile/WifiDirectTransport.kt:348"
+  ],
+  "Could not route traffic to the direct network. Stop Wi-Fi Direct and retry.": [
+    "android/app/src/main/java/dev/landrop/mobile/WifiDirectTransport.kt:543"
+  ],
+  "Could not join ${credentials.networkName}: connection timed out. Retry the QR scan.": [
+    "android/app/src/main/java/dev/landrop/mobile/WifiDirectTransport.kt:582"
+  ],
+  "Wi-Fi Direct stopped in LanDrop. If the system link remains, turn Wi-Fi off and on.": [
+    "android/app/src/main/java/dev/landrop/mobile/WifiDirectTransport.kt:634"
+  ],
+  "Wi-Fi Direct stopped.": [
+    "android/app/src/main/java/dev/landrop/mobile/WifiDirectTransport.kt:643"
+  ],
+  "LanDrop connection released. If Wi-Fi Direct is still stuck, turn Wi-Fi off and on.": [
+    "android/app/src/main/java/dev/landrop/mobile/WifiDirectTransport.kt:646"
+  ],
+  "LanDrop connection released. Turn Wi-Fi off and on if the system link remains.": [
+    "android/app/src/main/java/dev/landrop/mobile/WifiDirectTransport.kt:650"
+  ],
+  "Could not start Wi-Fi Direct: turn on Location in Android settings, then retry the QR code.": [
+    "android/app/src/main/java/dev/landrop/mobile/WifiDirectTransport.kt:668"
+  ],
+  "internal error, toggle Wi-Fi and retry": [
+    "android/app/src/main/java/dev/landrop/mobile/WifiDirectTransport.kt:715"
+  ],
+  "no service request (retry discovery first)": [
+    "android/app/src/main/java/dev/landrop/mobile/WifiDirectTransport.kt:716"
+  ],
+  "Phone cannot see or rejoin this network?": [
+    "src/lib/components/DirectWifi.svelte:62"
+  ],
+  "Look in the phone's normal Wi-Fi list, or scan the QR in LanDrop. The PC network may not appear in Android's Wi-Fi Direct device list.": [
+    "src/lib/components/DirectWifi.svelte:63"
+  ],
+  "Stop Wi-Fi Direct in LanDrop on the phone, then stop and start it here and scan the new QR. On Android 10-12, also enable Location.": [
+    "src/lib/components/DirectWifi.svelte:64"
+  ],
+  "If only some phones see the network, try Windows Mobile Hotspot set to 2.4 GHz with this direct host stopped. Connect the phone to that hotspot and use LanDrop normally.": [
+    "src/lib/components/DirectWifi.svelte:65"
+  ],
+  "Unknown peer": [
+    "src/lib/api/commands.ts:459"
+  ],
+  "Waiting for receiver approval": [
+    "src/lib/api/commands.ts:466",
+    "src/lib/api/commands.ts:568"
+  ],
+  "selected folder": [
+    "src/lib/api/commands.ts:490"
+  ],
+  "Receiver rejected the transfer.": [
+    "src/lib/api/commands.ts:491"
+  ],
+  "No retry context exists for this transfer.": [
+    "src/lib/api/commands.ts:560"
+  ],
+  "Firewall setup is only available in the desktop app.": [
+    "src/lib/api/commands.ts:606"
+  ],
+  "Firewall removal is only available in the desktop app.": [
+    "src/lib/api/commands.ts:618"
+  ]
+}

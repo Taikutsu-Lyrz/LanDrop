@@ -1,0 +1,19 @@
+{
+  "shared": {
+    "Not connected": "Not connected",
+    "Connected": "Connected",
+    "Wi-Fi": "Wi-Fi",
+    "Transfer rejected.": "Transfer rejected.",
+    "Choose files": "Choose files",
+    "New code": "New code",
+    "Stop": "Stop",
+    "Remote computer": "Remote computer",
+    "Pair code required or invalid.": "Pair code required or invalid.",
+    "Transfer canceled by user.": "Transfer canceled by user."
+  },
+  "android": {
+    "Android blocks selecting Downloads or the storage root in the system picker. Use Downloads/LanDrop here, or choose a folder inside storage.": "Android blocks selecting Downloads or the storage root in the system picker. Use Downloads/LanDrop here, or choose a folder inside storage.",
+    "Choose a folder for incoming files. An existing LanDrop folder is used directly.": "Choose a folder for incoming files. An existing LanDrop folder is used directly."
+  },
+  "desktop": {}
+}

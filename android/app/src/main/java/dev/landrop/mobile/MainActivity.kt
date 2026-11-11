@@ -15,12 +15,32 @@ import android.provider.Settings
 import android.provider.DocumentsContract
 import android.provider.OpenableColumns
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.automirrored.rounded.ArrowForward
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
+import androidx.compose.animation.SizeTransform
+import androidx.compose.material.icons.rounded.Palette
+import androidx.compose.material.icons.rounded.Wifi
+import androidx.compose.material.icons.rounded.Speed
+import androidx.compose.material.icons.rounded.Info
+import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.snap
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.zIndex
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
@@ -32,6 +52,15 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInParent
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.material.icons.rounded.DragHandle
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.draggable
 import androidx.compose.foundation.gestures.rememberDraggableState
@@ -53,6 +82,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -331,7 +361,6 @@ private data class AndroidParallelSendSession(
 private fun LanDropRoot() {
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences("landrop_android", Context.MODE_PRIVATE) }
-    val appTranslations = remember { loadDariTranslations(context) }
     var appLanguage by remember {
         mutableStateOf(
             runCatching {
@@ -342,6 +371,7 @@ private fun LanDropRoot() {
             }.getOrDefault(AppLanguage.English)
         )
     }
+    val appTranslations = remember(appLanguage) { loadAppTranslations(context, appLanguage) }
     var themeMode by remember {
         mutableStateOf(
             runCatching {
@@ -370,7 +400,7 @@ private fun LanDropRoot() {
     CompositionLocalProvider(
         LocalAppLanguage provides appLanguage,
         LocalAppTranslations provides appTranslations,
-        LocalLayoutDirection provides if (appLanguage == AppLanguage.Dari) {
+        LocalLayoutDirection provides if (appLanguage.rtl) {
             LayoutDirection.Rtl
         } else {
             LayoutDirection.Ltr
@@ -497,7 +527,6 @@ private fun LanDropApp(
     val pullToRefreshState = rememberPullToRefreshState()
     val receiveListState = rememberLazyListState()
     val sendListState = rememberLazyListState()
-    val settingsListState = rememberLazyListState()
     var receiveHistory by remember { mutableStateOf<List<ReceiveHistoryItem>>(emptyList()) }
     var sendHistory by remember { mutableStateOf<List<SendHistoryItem>>(emptyList()) }
     var historyLoaded by remember { mutableStateOf(false) }
@@ -728,6 +757,7 @@ private fun LanDropApp(
             status = "Folder selected."
         }
     }
+    var showReceiveDestination by remember { mutableStateOf(false) }
     val receiveFolderPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocumentTree()
     ) { uri ->
@@ -1144,11 +1174,44 @@ private fun LanDropApp(
         }
     }
 
+    if (showReceiveDestination) {
+        AlertDialog(
+            onDismissRequest = { showReceiveDestination = false },
+            title = { Text("Choose a save folder") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(if (Build.VERSION.SDK_INT >= 30) {
+                        "Android blocks selecting Downloads or the storage root in the system picker. Use Downloads/LanDrop here, or choose a folder inside storage."
+                    } else if (Build.VERSION.SDK_INT >= 29) {
+                        "Choose Downloads/LanDrop or another folder. An existing LanDrop folder is used directly."
+                    } else {
+                        "Choose a folder for incoming files. An existing LanDrop folder is used directly."
+                    })
+                    if (Build.VERSION.SDK_INT >= 29) {
+                        FilledTonalButton(onClick = {
+                            receiveSaveTreeUri = Uri.parse(DOWNLOADS_DESTINATION)
+                            prefs.edit().putString("receive_save_tree_uri", DOWNLOADS_DESTINATION).apply()
+                            status = "Receive folder selected."
+                            receiveFolderError = null
+                            showReceiveDestination = false
+                        }, modifier = Modifier.fillMaxWidth()) { Text("Downloads/LanDrop") }
+                    }
+                    OutlinedButton(onClick = {
+                        showReceiveDestination = false
+                        receiveFolderPicker.launch(receiveSaveTreeUri?.takeUnless { it.toString() == DOWNLOADS_DESTINATION })
+                    }, modifier = Modifier.fillMaxWidth()) { Text("Choose another folder") }
+                }
+            },
+            confirmButton = { TextButton(onClick = { showReceiveDestination = false }) { Text("Close") } }
+        )
+    }
     if (!onboardingComplete) {
         OnboardingScreen(
+            language = appLanguage,
+            onLanguageChange = onAppLanguageChange,
             saveFolderName = receiveSaveTreeUri?.let(::describeTreeUri),
             folderError = receiveFolderError,
-            onChooseSaveFolder = { receiveFolderPicker.launch(receiveSaveTreeUri) },
+            onChooseSaveFolder = { showReceiveDestination = true },
             onComplete = {
                 if (receiveSaveTreeUri != null) {
                     onboardingComplete = true
@@ -1186,7 +1249,7 @@ private fun LanDropApp(
                 offer = offer,
                 saveFolderName = receiveSaveTreeUri?.let(::describeTreeUri),
                 folderError = receiveFolderError,
-                onChooseSaveFolder = { receiveFolderPicker.launch(receiveSaveTreeUri) },
+                onChooseSaveFolder = { showReceiveDestination = true },
                 onAccept = { pendingIncomingDecision?.invoke(true) },
                 onReject = { pendingIncomingDecision?.invoke(false) }
             )
@@ -1237,13 +1300,176 @@ private fun LanDropApp(
                 }
             }
         ) {
+            if (selectedTab == Tab.Settings) {
+            SettingsScreen(
+                deviceName = localDeviceName,
+                receiveEnabled = receiveEnabled,
+                pairCodeEnabled = pairCodeEnabled,
+                pairCode = pairCode,
+                themeMode = themeMode,
+                appLanguage = appLanguage,
+                networkDetails = networkDetails,
+                showLogs = showLogs,
+                logs = logs,
+                trustedDeviceIps = knownPeerIps.toList().sorted(),
+                vpnPeers = vpnPeers,
+                trustedDeviceIds = trustedDeviceIds,
+                concurrentFileStreams = concurrentFileStreams,
+                wifiDirectStatus = wifiDirectStatus,
+                wifiDirectLink = wifiDirectLink,
+                wifiDirectHostCredentials = wifiDirectHostCredentials,
+                wifiDirectProbing = wifiDirectProbing,
+                wifiDirectJoining = wifiDirectJoining,
+                remotePeer = remotePeer,
+                remoteConnecting = remoteConnecting,
+                remoteConnectionMessage = remoteConnectionMessage,
+                hasStoredRemoteInvite = !storedRemoteInvite.isNullOrBlank(),
+                onSaveDeviceName = { nextName ->
+                    val sanitized = nextName.trim().take(48)
+                    if (sanitized.isNotBlank()) {
+                        localDeviceName = sanitized
+                        prefs.edit().putString("device_name", sanitized).apply()
+                        status = "Device name saved as $sanitized."
+                        AppLog.add("Device name changed to $sanitized")
+                    }
+                },
+                onToggleReceive = { receiveEnabled = !receiveEnabled },
+                onTogglePairCode = {
+                    pairCodeEnabled = !pairCodeEnabled
+                    prefs.edit().putBoolean("pair_code_enabled", pairCodeEnabled).apply()
+                },
+                onThemeModeChange = onThemeModeChange,
+                onAppLanguageChange = onAppLanguageChange,
+                onConcurrentFileStreamsChange = { count ->
+                    concurrentFileStreams = count.coerceIn(1, 100)
+                    prefs.edit().putInt("concurrent_file_streams", concurrentFileStreams).apply()
+                    status = "Concurrent file streams set to $concurrentFileStreams."
+                },
+                onRefreshDiscovery = {
+                    networkDetails = NetworkDetails.activeNetworkDetails(context)
+                    status = "Searching the local network."
+                    discovery.probeNow()
+                },
+                onLoadLogs = {
+                    logs = AppLog.snapshot()
+                    showLogs = !showLogs
+                },
+                onOpenHotspotSettings = {
+                    runCatching {
+                        context.startActivity(Intent("android.settings.TETHER_SETTINGS"))
+                    }.onFailure {
+                        context.startActivity(Intent(Settings.ACTION_WIRELESS_SETTINGS))
+                    }
+                },
+                onDisconnectWifiDirect = {
+                    pendingWifiDirectAction = null
+                    wifiDirectTransport.disconnect()
+                },
+                directLanDropPeers = discoveredPeers.filter { peer ->
+                    peer.adapterKind.equals("wifi_direct", ignoreCase = true) ||
+                        peer.ip.startsWith("192.168.49.") ||
+                        peer.ip.startsWith("192.168.137.")
+                },
+                onSendToDirectPeer = { peer ->
+                    manualPeer = ManualPeer(
+                        name = peer.name,
+                        ip = peer.ip,
+                        port = peer.port,
+                        availability = peer.availability,
+                        requiresPairCode = peer.requiresPairCode,
+                        deviceKind = peer.deviceKind,
+                        deviceId = peer.deviceId
+                    )
+                    manualIp = peer.ip
+                    selectedTab = Tab.Send
+                    status = "Selected ${peer.name} for Send."
+                },
+                onHostWifiDirect = {
+                    val missing = wifiDirectTransport.missingPermissions()
+                    if (missing.isEmpty()) {
+                        wifiDirectTransport.createGroup()
+                    } else {
+                        pendingWifiDirectAction = { wifiDirectTransport.createGroup() }
+                        wifiDirectPermissionLauncher.launch(missing.toTypedArray())
+                    }
+                },
+onJoinWifiDirectQr = { payload ->
+    val credentials = WifiDirectCredentials.fromQrPayload(payload)
+    if (credentials == null) {
+        status = "Invalid LanDrop Wi-Fi Direct QR code."
+        wifiDirectStatus = status
+        wifiDirectJoining = false
+    } else {
+        val connectAction = {
+            wifiDirectHostCredentials = null
+            wifiDirectJoining = true
+            wifiDirectTransport.connect(credentials)
+        }
+                        val missing = wifiDirectTransport.missingPermissions()
+                        if (missing.isEmpty()) {
+                            connectAction()
+                        } else {
+                            pendingWifiDirectAction = connectAction
+                            wifiDirectPermissionLauncher.launch(missing.toTypedArray())
+                        }
+                    }
+                },
+                onRetryWifiDirectProbe = {
+                    wifiDirectLink?.let { probeWifiDirectLink(it) }
+                        ?: wifiDirectTransport.refreshLinkInfo()
+                },
+                onConnectRemote = { invite ->
+                    connectRemoteInvite(invite, persist = true)
+                },
+                onReconnectRemote = {
+                    val invite = storedRemoteInvite
+                    if (!invite.isNullOrBlank()) {
+                        connectRemoteInvite(invite, persist = false)
+                    } else {
+                        status = "No saved remote invite to reconnect."
+                    }
+                },
+                onUseRemote = {
+                    remotePeer?.let { peer ->
+                        manualPeer = peer
+                        selectedTab = Tab.Send
+                        status = "Selected secure remote computer ${peer.name}."
+                    }
+                },
+                onForgetRemote = {
+                    remoteTunnel.stop()
+                    AndroidRemoteInviteStore.clear(prefs)
+                    storedRemoteInvite = null
+                    if (manualPeer?.remote == true) {
+                        manualPeer = null
+                    }
+                    remotePeer = null
+                    status = "Remote computer removed and its invite revoked on this phone."
+                    remoteConnectionMessage =
+                        "Scan the QR code shown by the receiving computer."
+                },
+                onNewPairCode = {
+                    pairCode = generatePairCode()
+                    prefs.edit().putString("pair_code", pairCode).apply()
+                    status = "New pair code: $pairCode."
+                },
+                onForgetTrustedIp = { ip ->
+                    knownPeerIps = knownPeerIps - ip
+                    prefs.edit().putStringSet("known_peer_ips", knownPeerIps).apply()
+                    status = "Removed trusted device $ip."
+                },
+                onForgetVpnPeer = { vpn ->
+                    vpnPeers = vpnPeers.filterNot { it.host.equals(vpn.host, ignoreCase = true) }
+                    saveVpnPeers(prefs, vpnPeers)
+                    knownPeerIps = knownPeerIps - vpn.host
+                    prefs.edit().putStringSet("known_peer_ips", knownPeerIps).apply()
+                    status = "Removed VPN device ${vpn.host}."
+                }
+            )
+            } else {
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
-                state = when (selectedTab) {
-                    Tab.Receive -> receiveListState
-                    Tab.Send -> sendListState
-                    Tab.Settings -> settingsListState
-                },
+                state = if (selectedTab == Tab.Receive) receiveListState else sendListState,
                 contentPadding = PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 12.dp),
                 verticalArrangement = Arrangement.spacedBy(14.dp)
             ) {
@@ -1260,7 +1486,7 @@ private fun LanDropApp(
                             quickSaveMode = quickSaveMode,
                             receiveProgress = receiveProgress,
                             pendingIncomingOffer = pendingIncomingOffer,
-                            onChooseSaveFolder = { receiveFolderPicker.launch(null) },
+                            onChooseSaveFolder = { showReceiveDestination = true },
                             onQuickSaveModeChange = { mode ->
                                 quickSaveMode = mode
                                 prefs.edit().putString("quick_save_mode", mode.name).apply()
@@ -1674,176 +1900,9 @@ private fun LanDropApp(
                         )
                     }
                 }
-                Tab.Settings -> {
-                    item {
-                        SettingsScreen(
-                            deviceName = localDeviceName,
-                            receiveEnabled = receiveEnabled,
-                            pairCodeEnabled = pairCodeEnabled,
-                            pairCode = pairCode,
-                            themeMode = themeMode,
-                            appLanguage = appLanguage,
-                            networkDetails = networkDetails,
-                            showLogs = showLogs,
-                            logs = logs,
-                            trustedDeviceIps = knownPeerIps.toList().sorted(),
-                            vpnPeers = vpnPeers,
-                            trustedDeviceIds = trustedDeviceIds,
-                            concurrentFileStreams = concurrentFileStreams,
-                            wifiDirectStatus = wifiDirectStatus,
-                            wifiDirectLink = wifiDirectLink,
-                            wifiDirectHostCredentials = wifiDirectHostCredentials,
-                            wifiDirectProbing = wifiDirectProbing,
-                            wifiDirectJoining = wifiDirectJoining,
-                            remotePeer = remotePeer,
-                            remoteConnecting = remoteConnecting,
-                            remoteConnectionMessage = remoteConnectionMessage,
-                            hasStoredRemoteInvite = !storedRemoteInvite.isNullOrBlank(),
-                            onSaveDeviceName = { nextName ->
-                                val sanitized = nextName.trim().take(48)
-                                if (sanitized.isNotBlank()) {
-                                    localDeviceName = sanitized
-                                    prefs.edit().putString("device_name", sanitized).apply()
-                                    status = "Device name saved as $sanitized."
-                                    AppLog.add("Device name changed to $sanitized")
-                                }
-                            },
-                            onToggleReceive = { receiveEnabled = !receiveEnabled },
-                            onTogglePairCode = {
-                                pairCodeEnabled = !pairCodeEnabled
-                                prefs.edit().putBoolean("pair_code_enabled", pairCodeEnabled).apply()
-                            },
-                            onThemeModeChange = onThemeModeChange,
-                            onAppLanguageChange = onAppLanguageChange,
-                            onConcurrentFileStreamsChange = { count ->
-                                concurrentFileStreams = count.coerceIn(1, 100)
-                                prefs.edit().putInt("concurrent_file_streams", concurrentFileStreams).apply()
-                                status = "Concurrent file streams set to $concurrentFileStreams."
-                            },
-                            onRefreshDiscovery = {
-                                networkDetails = NetworkDetails.activeNetworkDetails(context)
-                                status = "Searching the local network."
-                                discovery.probeNow()
-                            },
-                            onLoadLogs = {
-                                logs = AppLog.snapshot()
-                                showLogs = !showLogs
-                            },
-                            onOpenHotspotSettings = {
-                                runCatching {
-                                    context.startActivity(Intent("android.settings.TETHER_SETTINGS"))
-                                }.onFailure {
-                                    context.startActivity(Intent(Settings.ACTION_WIRELESS_SETTINGS))
-                                }
-                            },
-                            onDisconnectWifiDirect = {
-                                pendingWifiDirectAction = null
-                                wifiDirectTransport.disconnect()
-                            },
-                            directLanDropPeers = discoveredPeers.filter { peer ->
-                                peer.adapterKind.equals("wifi_direct", ignoreCase = true) ||
-                                    peer.ip.startsWith("192.168.49.") ||
-                                    peer.ip.startsWith("192.168.137.")
-                            },
-                            onSendToDirectPeer = { peer ->
-                                manualPeer = ManualPeer(
-                                    name = peer.name,
-                                    ip = peer.ip,
-                                    port = peer.port,
-                                    availability = peer.availability,
-                                    requiresPairCode = peer.requiresPairCode,
-                                    deviceKind = peer.deviceKind,
-                                    deviceId = peer.deviceId
-                                )
-                                manualIp = peer.ip
-                                selectedTab = Tab.Send
-                                status = "Selected ${peer.name} for Send."
-                            },
-                            onHostWifiDirect = {
-                                val missing = wifiDirectTransport.missingPermissions()
-                                if (missing.isEmpty()) {
-                                    wifiDirectTransport.createGroup()
-                                } else {
-                                    pendingWifiDirectAction = { wifiDirectTransport.createGroup() }
-                                    wifiDirectPermissionLauncher.launch(missing.toTypedArray())
-                                }
-                            },
-            onJoinWifiDirectQr = { payload ->
-                val credentials = WifiDirectCredentials.fromQrPayload(payload)
-                if (credentials == null) {
-                    status = "Invalid LanDrop Wi-Fi Direct QR code."
-                    wifiDirectStatus = status
-                    wifiDirectJoining = false
-                } else {
-                    val connectAction = {
-                        wifiDirectHostCredentials = null
-                        wifiDirectJoining = true
-                        wifiDirectTransport.connect(credentials)
-                    }
-                                    val missing = wifiDirectTransport.missingPermissions()
-                                    if (missing.isEmpty()) {
-                                        connectAction()
-                                    } else {
-                                        pendingWifiDirectAction = connectAction
-                                        wifiDirectPermissionLauncher.launch(missing.toTypedArray())
-                                    }
-                                }
-                            },
-                            onRetryWifiDirectProbe = {
-                                wifiDirectLink?.let { probeWifiDirectLink(it) }
-                                    ?: wifiDirectTransport.refreshLinkInfo()
-                            },
-                            onConnectRemote = { invite ->
-                                connectRemoteInvite(invite, persist = true)
-                            },
-                            onReconnectRemote = {
-                                val invite = storedRemoteInvite
-                                if (!invite.isNullOrBlank()) {
-                                    connectRemoteInvite(invite, persist = false)
-                                } else {
-                                    status = "No saved remote invite to reconnect."
-                                }
-                            },
-                            onUseRemote = {
-                                remotePeer?.let { peer ->
-                                    manualPeer = peer
-                                    selectedTab = Tab.Send
-                                    status = "Selected secure remote computer ${peer.name}."
-                                }
-                            },
-                            onForgetRemote = {
-                                remoteTunnel.stop()
-                                AndroidRemoteInviteStore.clear(prefs)
-                                storedRemoteInvite = null
-                                if (manualPeer?.remote == true) {
-                                    manualPeer = null
-                                }
-                                remotePeer = null
-                                status = "Remote computer removed and its invite revoked on this phone."
-                                remoteConnectionMessage =
-                                    "Scan the QR code shown by the receiving computer."
-                            },
-                            onNewPairCode = {
-                                pairCode = generatePairCode()
-                                prefs.edit().putString("pair_code", pairCode).apply()
-                                status = "New pair code: $pairCode."
-                            },
-                            onForgetTrustedIp = { ip ->
-                                knownPeerIps = knownPeerIps - ip
-                                prefs.edit().putStringSet("known_peer_ips", knownPeerIps).apply()
-                                status = "Removed trusted device $ip."
-                            },
-                            onForgetVpnPeer = { vpn ->
-                                vpnPeers = vpnPeers.filterNot { it.host.equals(vpn.host, ignoreCase = true) }
-                                saveVpnPeers(prefs, vpnPeers)
-                                knownPeerIps = knownPeerIps - vpn.host
-                                prefs.edit().putStringSet("known_peer_ips", knownPeerIps).apply()
-                                status = "Removed VPN device ${vpn.host}."
-                            }
-                        )
-                    }
+                Tab.Settings -> Unit
                 }
-                }
+            }
             }
         }
     }
@@ -1893,6 +1952,7 @@ private fun describePickedUri(context: Context, uri: Uri): Pair<String, Long?> {
 }
 
 private fun describeTreeUri(uri: Uri): String {
+    if (uri.toString() == DOWNLOADS_DESTINATION) return "Downloads/LanDrop"
     val path = uri.lastPathSegment ?: return "Selected folder"
     return path.substringAfterLast(':').ifBlank { "Selected folder" }
 }
@@ -1998,6 +2058,14 @@ private fun parseProbeResult(raw: String): ProbeResult {
 private fun manualPeerLinkLabel(peer: ManualPeer): String {
     if (peer.remote) return "Secure"
     return linkLabelForIp(peer.ip)
+}
+
+private fun availabilityLabel(availability: String) = when (availability) {
+    "available" -> "Available"
+    "receive_disabled" -> "Receive paused."
+    "busy" -> "Busy"
+    "unavailable" -> "Unavailable"
+    else -> "Unknown"
 }
 
 private fun linkLabelForIp(ip: String): String {
@@ -3627,6 +3695,8 @@ private fun BrandMark() {
 @Composable
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 private fun OnboardingScreen(
+    language: AppLanguage,
+    onLanguageChange: (AppLanguage) -> Unit,
     saveFolderName: String?,
     folderError: String?,
     onChooseSaveFolder: () -> Unit,
@@ -3634,6 +3704,11 @@ private fun OnboardingScreen(
 ) {
     var page by remember { mutableStateOf(0) }
     val pages = listOf(
+        Triple(
+            "Welcome to LanDrop",
+            "Share files between your devices. Choose your language, connect, and start transferring.",
+            Icons.Rounded.Send
+        ),
         Triple(
             "Local transfer",
             "LanDrop sends files directly over your local network. No account, cloud, or mobile data is needed.",
@@ -3706,6 +3781,9 @@ private fun OnboardingScreen(
                         fontSize = 16.sp,
                         lineHeight = 23.sp
                     )
+                    if (targetPage == 0) {
+                        LanguageControl(language = language, onLanguageChange = onLanguageChange)
+                    }
                     if (targetPage == pages.lastIndex) {
                         Card(
                             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -3804,7 +3882,7 @@ private fun IncomingOfferDialog(
                         if (offer.directoryCount > 0) " and ${offer.directoryCount} folder(s)." else "."
                 )
                 Text(
-                    "${formatBytesApprox(offer.totalBytes)} • ${linkLabelForIp(offer.senderIp)}",
+                    "${formatBytesApprox(offer.totalBytes)} • ${localizeAppText(linkLabelForIp(offer.senderIp))}",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontSize = 13.sp
                 )
@@ -3855,7 +3933,7 @@ private fun IncomingOfferInlineCard(
                 fontSize = 13.sp
             )
             Text(
-                "${formatBytesApprox(offer.totalBytes)} • ${linkLabelForIp(offer.senderIp)}",
+                "${formatBytesApprox(offer.totalBytes)} • ${localizeAppText(linkLabelForIp(offer.senderIp))}",
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontSize = 12.sp
             )
@@ -4020,7 +4098,7 @@ private fun DismissibleHistoryRow(
                 ) {
                     Icon(
                         Icons.Rounded.Delete,
-                        contentDescription = "Delete",
+                        contentDescription = localizeAppText("Delete"),
                         tint = MaterialTheme.colorScheme.onErrorContainer
                     )
                     Text(
@@ -4541,7 +4619,7 @@ private fun SendScreen(
                         )
                     }
                     IconButton(onClick = onRefresh) {
-                        Icon(Icons.Rounded.Refresh, contentDescription = "Refresh")
+                        Icon(Icons.Rounded.Refresh, contentDescription = localizeAppText("Refresh"))
                     }
                 }
                 if (wifiDirectLink != null) {
@@ -4710,7 +4788,7 @@ private fun DiscoveredPeersPanel(
                     Column(modifier = Modifier.weight(1f)) {
                         Text(peer.name, fontWeight = FontWeight.Bold)
                         Text(
-                            "${peer.ip}:${peer.port} • ${peer.availability}",
+                            "${peer.ip}:${peer.port} • ${localizeAppText(availabilityLabel(peer.availability))}",
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             fontSize = 12.sp,
                             maxLines = 1,
@@ -5129,7 +5207,7 @@ private fun DismissibleSelectedItemRow(
             ) {
                 Icon(
                     Icons.Rounded.Delete,
-                    contentDescription = "Remove",
+                    contentDescription = localizeAppText("Remove"),
                     tint = MaterialTheme.colorScheme.primary
                 )
                 Spacer(Modifier.width(8.dp))
@@ -5260,7 +5338,7 @@ private fun ConnectedPeerCard(peer: ManualPeer) {
                     if (peer.remote) {
                         "Secure remote - ${peer.endpointLabel ?: peer.name}"
                     } else {
-                        "${peer.ip}:${peer.port} - ${peer.availability}"
+                        "${peer.ip}:${peer.port} - ${localizeAppText(availabilityLabel(peer.availability))}"
                     },
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontSize = 13.sp
@@ -5327,6 +5405,100 @@ private fun SettingsScreen(
     onForgetTrustedIp: (String) -> Unit,
     onForgetVpnPeer: (VpnSavedPeer) -> Unit = {}
 ) {
+    val layoutContext = LocalContext.current
+    val layoutPrefs = remember(layoutContext) { layoutContext.getSharedPreferences("settings_layout", Context.MODE_PRIVATE) }
+    val sectionTitles = linkedMapOf(
+        "appearance" to "Theme and language", "remote" to "Remote file sharing",
+        "wifi" to "Wi-Fi Direct", "network" to "Network and connections",
+        "trusted" to "Trusted devices", "performance" to "Transfer performance",
+        "device" to "About LanDrop", "shortcuts" to "More settings"
+    )
+    fun sectionIcon(id: String) = when (id) {
+        "appearance" -> Icons.Rounded.Palette
+        "remote" -> Icons.Rounded.LaptopWindows
+        "wifi" -> Icons.Rounded.Wifi
+        "network" -> Icons.Rounded.Lan
+        "trusted" -> Icons.Rounded.Security
+        "performance" -> Icons.Rounded.Speed
+        "shortcuts" -> Icons.Rounded.Settings
+        "device" -> Icons.Rounded.Info
+        else -> Icons.Rounded.Tune
+    }
+    var pinnedSections by remember {
+        mutableStateOf(layoutPrefs.getString("pinned_sections", "").orEmpty().split(",")
+            .filter { it in sectionTitles }.distinct())
+    }
+    var sectionOrder by remember {
+        val saved = layoutPrefs.getString("section_order", null)?.split(",") ?: pinnedSections
+        mutableStateOf((saved.filter { it in sectionTitles } + sectionTitles.keys).distinct())
+    }
+    fun saveSectionOrder(sections: List<String>) {
+        sectionOrder = sections
+        layoutPrefs.edit().putString("section_order", sections.joinToString(",")).apply()
+    }
+    fun resetSettingsLayout() {
+        pinnedSections = emptyList()
+        sectionOrder = sectionTitles.keys.toList()
+        layoutPrefs.edit().remove("pinned_sections").remove("section_order").apply()
+    }
+    fun savePinnedSections(sections: List<String>) {
+        pinnedSections = sections
+        layoutPrefs.edit().putString("pinned_sections", sections.joinToString(",")).apply()
+    }
+    fun moveSettingsSection(id: String, delta: Int) {
+        val next = sectionOrder.toMutableList()
+        val index = next.indexOf(id)
+        val target = index + delta
+        if (index >= 0 && target in next.indices) {
+            next.removeAt(index)
+            next.add(target, id)
+            saveSectionOrder(next)
+        }
+    }
+    val preferenceBounds = remember { mutableStateMapOf<String, Rect>() }
+    var draggedPreference by remember { mutableStateOf<String?>(null) }
+    var preferenceDragY by remember { mutableStateOf(0f) }
+    val currentSectionOrder = rememberUpdatedState(sectionOrder)
+    val reorderPreference = rememberUpdatedState<(String) -> Unit> { target ->
+        val id = draggedPreference
+        val next = sectionOrder.toMutableList()
+        val from = next.indexOf(id)
+        val to = next.indexOf(target)
+        if (from >= 0 && to >= 0 && from != to) {
+            next.removeAt(from)
+            next.add(to, id!!)
+            saveSectionOrder(next)
+        }
+    }
+    val summaryTranslations = LocalAppTranslations.current
+    val themeSummary = summaryTranslations.translate(when (themeMode) { ThemeMode.Dark -> "Dark"; ThemeMode.Oled -> "OLED"; ThemeMode.Light -> "Light" })
+    val settingsVersion = remember(layoutContext) {
+        layoutContext.packageManager.getPackageInfo(layoutContext.packageName, 0).versionName.orEmpty()
+    }
+    fun sectionDetails(id: String): String = when (id) {
+        "appearance" -> "$themeSummary • ${appLanguage.nativeLabel}"
+        "remote" -> when {
+            remoteConnecting -> "Connecting"
+            remotePeer != null -> "Connected to ${remotePeer.name}"
+            hasStoredRemoteInvite -> "Saved computer, offline"
+            else -> "No remote computer"
+        }
+        "wifi" -> when {
+            wifiDirectJoining -> "Connecting"
+            wifiDirectLink != null -> "Connected"
+            else -> "Not connected"
+        }
+        "network" -> "${summaryTranslations.translate(networkDetails.transport)} • ${summaryTranslations.translate(networkDetails.addresses)}"
+        "trusted" -> "Trusted devices: ${maxOf(trustedDeviceIds.size, trustedDeviceIps.size)}"
+        "performance" -> "Concurrent files: $concurrentFileStreams"
+        "device" -> "Version v$settingsVersion"
+        else -> "Customize your Settings page"
+    }
+    var settingsPage by rememberSaveable { mutableStateOf("home") }
+    BackHandler(enabled = settingsPage != "home") { settingsPage = "home" }
+    // Each animated page owns its scroll position, so opening a subpage never
+    // resets the outgoing page or scrolls it visibly back to the top.
+    val pageStateHolder = rememberSaveableStateHolder()
     var deviceNameDraft by remember(deviceName) { mutableStateOf(deviceName) }
     var concurrencyDraft by remember(concurrentFileStreams) {
         mutableStateOf(concurrentFileStreams.toString())
@@ -5345,7 +5517,7 @@ private fun SettingsScreen(
             ScanOptions()
                 .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
                 .setPrompt(
-                    if (appLanguage == AppLanguage.Dari) {
+                    if (appLanguage != AppLanguage.English) {
                         appTranslations.translate("Scan the QR code shown by the receiving computer")
                     } else {
                         "Scan the QR code shown by the receiving computer"
@@ -5368,7 +5540,7 @@ private fun SettingsScreen(
             ScanOptions()
                 .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
                 .setPrompt(
-                    if (appLanguage == AppLanguage.Dari) {
+                    if (appLanguage != AppLanguage.English) {
                         appTranslations.translate("Scan the Wi-Fi Direct QR code shown by the host")
                     } else {
                         "Scan the Wi-Fi Direct QR code shown by the host"
@@ -5380,15 +5552,234 @@ private fun SettingsScreen(
         )
     }
 
+    val direction = if (LocalLayoutDirection.current == LayoutDirection.Rtl) -1 else 1
+    AnimatedContent(
+        targetState = settingsPage,
+        modifier = Modifier.fillMaxSize(),
+        transitionSpec = {
+            val travel = if (targetState == "home") -direction else direction
+            ((fadeIn(tween(220)) + slideInHorizontally(tween(260)) { travel * 48 }) togetherWith
+                (fadeOut(tween(150)) + slideOutHorizontally(tween(220)) { -travel * 48 }))
+                .using(SizeTransform(clip = false))
+        },
+        label = "settingsPage"
+    ) { displayedPage ->
+    pageStateHolder.SaveableStateProvider(displayedPage) {
+    if (displayedPage == "preferences") {
+        LazyColumn(
+            state = rememberLazyListState(),
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(16.dp),
+            verticalArrangement = Arrangement.spacedBy(18.dp)
+        ) {
+            item {
+                Column(verticalArrangement = Arrangement.spacedBy(18.dp)) {
+                    TextButton(onClick = { settingsPage = "home" }) {
+                        Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = null)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Settings")
+                    }
+                    Text("Preferences", fontSize = 32.sp, fontWeight = FontWeight.Bold)
+                    Text("Turn on a section to show its controls on the main page instead of a shortcut. Drag any section to reorder it, or use Move up and Move down.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+            items(sectionOrder, key = { it }) { id ->
+                val isDragging = draggedPreference == id
+                val dragOffset by animateFloatAsState(
+                    targetValue = if (isDragging) preferenceDragY - (preferenceBounds[id]?.center?.y ?: preferenceDragY) else 0f,
+                    animationSpec = if (isDragging) snap() else spring(dampingRatio = 0.8f, stiffness = 450f),
+                    label = "settingsDragOffset"
+                )
+                val dragScale by animateFloatAsState(if (isDragging) 1.025f else 1f, label = "settingsDragScale")
+                val dragElevation by animateDpAsState(if (isDragging) 12.dp else 0.dp, label = "settingsDragElevation")
+                val dragColor by animateColorAsState(
+                    if (isDragging) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surface,
+                    label = "settingsDragColor"
+                )
+                Box(
+                    modifier = Modifier.fillMaxWidth().animateItem(placementSpec = spring(dampingRatio = 0.85f, stiffness = 500f)).zIndex(if (isDragging) 1f else 0f)
+                        .onGloballyPositioned {
+                            preferenceBounds[id] = it.boundsInRoot()
+                        }
+                ) {
+                Card(
+                    modifier = Modifier.fillMaxWidth().graphicsLayer {
+                        translationY = dragOffset
+                        scaleX = dragScale
+                        scaleY = dragScale
+                        shadowElevation = dragElevation.toPx()
+                        shape = RoundedCornerShape(24.dp)
+                    },
+                    colors = CardDefaults.cardColors(containerColor = dragColor),
+                    shape = RoundedCornerShape(24.dp)
+                ) {
+                    Column {
+                        if (id == "shortcuts") {
+                            SettingsValueRow(icon = Icons.Rounded.Settings, title = "More settings", value = "Subpage shortcuts")
+                        } else SettingsToggleRow(
+                            icon = sectionIcon(id),
+                            title = sectionTitles.getValue(id),
+                            supporting = "Show on main page",
+                            checked = id in pinnedSections,
+                            onCheckedChange = { enabled -> savePinnedSections(if (enabled) pinnedSections + id else pinnedSections - id) }
+                        )
+                        run {
+                            Row(modifier = Modifier.padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    Icons.Rounded.DragHandle,
+                                    contentDescription = localizeAppText("Drag to reorder"),
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(48.dp).pointerInput(id) {
+                                        detectDragGestures(
+                                            onDragStart = {
+                                                draggedPreference = id
+                                                preferenceDragY = preferenceBounds[id]?.center?.y ?: 0f
+                                            },
+                                            onDragEnd = { draggedPreference = null },
+                                            onDragCancel = { draggedPreference = null }
+                                        ) { change, amount ->
+                                            change.consume()
+                                            preferenceDragY += amount.y
+                                            val order = currentSectionOrder.value
+                                            val index = order.indexOf(id)
+                                            val above = order.getOrNull(index - 1)
+                                            val below = order.getOrNull(index + 1)
+                                            val currentCenter = preferenceBounds[id]?.center?.y ?: preferenceDragY
+                                            if (amount.y < 0 && above != null && preferenceDragY < ((preferenceBounds[above]?.center?.y ?: Float.NEGATIVE_INFINITY) + currentCenter) / 2f) {
+                                                reorderPreference.value(above)
+                                            } else if (amount.y > 0 && below != null && preferenceDragY > ((preferenceBounds[below]?.center?.y ?: Float.POSITIVE_INFINITY) + currentCenter) / 2f) {
+                                                reorderPreference.value(below)
+                                            }
+                                        }
+                                    }.padding(12.dp)
+                                )
+                                TextButton(onClick = { moveSettingsSection(id, -1) }, enabled = sectionOrder.indexOf(id) > 0) { Text("Move up") }
+                                TextButton(onClick = { moveSettingsSection(id, 1) }, enabled = sectionOrder.indexOf(id) < sectionOrder.lastIndex) { Text("Move down") }
+                            }
+                        }
+                    }
+                }
+                }
+            }
+            item { OutlinedButton(onClick = { resetSettingsLayout() }) { Text("Reset layout") } }
+        }
+    } else {
     Column(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier.fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 12.dp),
         verticalArrangement = Arrangement.spacedBy(18.dp)
     ) {
-        Text("Settings", fontSize = 32.sp, fontWeight = FontWeight.Bold)
+        if (displayedPage != "home") {
+            TextButton(onClick = { settingsPage = "home" }) {
+                Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                Text("Settings")
+            }
+        }
         Text(
-            "Receive behavior, remote file sharing, and local network details.",
-            color = MaterialTheme.colorScheme.onSurfaceVariant
+            when (displayedPage) {
+                "preferences" -> "Preferences"
+                "wifi" -> "Wi-Fi Direct"
+                "appearance" -> "Theme and language"
+                "remote" -> "Remote file sharing"
+                "network" -> "Network and connections"
+                "trusted" -> "Trusted devices"
+                "performance" -> "Transfer performance"
+                "device" -> "About LanDrop"
+                else -> "Settings"
+            },
+            fontSize = 32.sp, fontWeight = FontWeight.Bold
         )
+        if (displayedPage == "home") {
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+            shape = RoundedCornerShape(24.dp)
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text("This device", fontWeight = FontWeight.Bold, fontSize = 20.sp)
+                Text(
+                    "This is the name other LanDrop devices see during discovery and transfers.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 13.sp
+                )
+                OutlinedTextField(
+                    value = deviceNameDraft,
+                    onValueChange = { deviceNameDraft = it.take(48) },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    label = { Text("Device name") }
+                )
+                Button(
+                    onClick = { onSaveDeviceName(deviceNameDraft) },
+                    enabled = deviceNameDraft.trim().isNotEmpty() && deviceNameDraft.trim() != deviceName,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Save name")
+                }
+            }
+        }
+        }
+        if (displayedPage == "home") {
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+            shape = RoundedCornerShape(24.dp)
+        ) {
+            Column {
+                SettingsToggleRow(
+                    icon = Icons.Rounded.Download,
+                    title = "Receive",
+                    supporting = if (receiveEnabled) "Accept incoming offers" else "Incoming offers paused",
+                    checked = receiveEnabled,
+                    onCheckedChange = { onToggleReceive() }
+                )
+                SettingsDivider()
+                SettingsToggleRow(
+                    icon = Icons.Rounded.Security,
+                    title = "Pair code",
+                    supporting = if (pairCodeEnabled) "Required: #$pairCode" else "Not required",
+                    checked = pairCodeEnabled,
+                    onCheckedChange = { onTogglePairCode() }
+                )
+                SettingsDivider()
+                SettingsActionRow(
+                    icon = Icons.Rounded.Refresh,
+                    title = "Change pair code",
+                    value = "New code",
+                    onClick = onNewPairCode
+                )
+            }
+        }
+        }
+        val visibleSections = if (displayedPage == "home") sectionOrder.filter { it in pinnedSections || it == "shortcuts" } else listOf(displayedPage)
+        visibleSections.forEach { section ->
+            key(section) {
+        if (section == "shortcuts") {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                shape = RoundedCornerShape(24.dp)
+            ) {
+                Column {
+                    (sectionOrder.filterNot { it in pinnedSections || it == "shortcuts" } + "preferences").forEachIndexed { index, id ->
+                        val title = sectionTitles[id] ?: "Preferences"
+                        if (index > 0) SettingsDivider()
+                        SettingsLinkRow(
+                            icon = { Icon(sectionIcon(id), contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
+                            title = title,
+                            supporting = sectionDetails(id),
+                            onClick = { settingsPage = id }
+                        )
+                    }
+                }
+            }
+        }
+        if (section == "remote") {
         Card(
             modifier = Modifier.fillMaxWidth(),
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -5457,7 +5848,7 @@ private fun SettingsScreen(
                             ) {
                                 Icon(
                                     Icons.Rounded.QrCodeScanner,
-                                    contentDescription = "Scan remote invite QR code"
+                                    contentDescription = localizeAppText("Scan remote invite QR code")
                                 )
                             }
                         }
@@ -5526,67 +5917,8 @@ private fun SettingsScreen(
                 )
             }
         }
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-            shape = RoundedCornerShape(24.dp)
-        ) {
-            Column(
-                modifier = Modifier.padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                Text("This device", fontWeight = FontWeight.Bold, fontSize = 20.sp)
-                Text(
-                    "This is the name other LanDrop devices see during discovery and transfers.",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    fontSize = 13.sp
-                )
-                OutlinedTextField(
-                    value = deviceNameDraft,
-                    onValueChange = { deviceNameDraft = it.take(48) },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true,
-                    label = { Text("Device name") }
-                )
-                Button(
-                    onClick = { onSaveDeviceName(deviceNameDraft) },
-                    enabled = deviceNameDraft.trim().isNotEmpty() && deviceNameDraft.trim() != deviceName,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text("Save name")
-                }
-            }
         }
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-            shape = RoundedCornerShape(24.dp)
-        ) {
-            Column {
-                SettingsToggleRow(
-                    icon = Icons.Rounded.Download,
-                    title = "Receive",
-                    supporting = if (receiveEnabled) "Accept incoming offers" else "Incoming offers paused",
-                    checked = receiveEnabled,
-                    onCheckedChange = { onToggleReceive() }
-                )
-                SettingsDivider()
-                SettingsToggleRow(
-                    icon = Icons.Rounded.Security,
-                    title = "Pair code",
-                    supporting = if (pairCodeEnabled) "Required: #$pairCode" else "Not required",
-                    checked = pairCodeEnabled,
-                    onCheckedChange = { onTogglePairCode() }
-                )
-                SettingsDivider()
-                SettingsActionRow(
-                    icon = Icons.Rounded.Refresh,
-                    title = "Change pair code",
-                    value = "New code",
-                    onClick = onNewPairCode
-                )
-            }
-        }
+        if (section == "appearance") {
         Card(
             modifier = Modifier.fillMaxWidth(),
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -5616,6 +5948,8 @@ private fun SettingsScreen(
                 )
             }
         }
+        }
+        if (section == "performance") {
         Card(
             modifier = Modifier.fillMaxWidth(),
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -5668,6 +6002,8 @@ private fun SettingsScreen(
                 }
             }
         }
+        }
+        if (section == "network") {
         Card(
             modifier = Modifier.fillMaxWidth(),
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -5721,6 +6057,8 @@ private fun SettingsScreen(
                 )
             }
         }
+        }
+        if (section == "wifi") {
         Card(
             modifier = Modifier.fillMaxWidth(),
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -5896,6 +6234,8 @@ private fun SettingsScreen(
                 }
             }
         }
+        }
+        if (section == "trusted") {
         Card(
             modifier = Modifier.fillMaxWidth(),
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -5969,10 +6309,17 @@ private fun SettingsScreen(
                 }
             }
         }
-        AboutLinksCard()
-        if (showLogs) {
+        }
+
+        if (section == "device") { AboutLinksCard() }
+        if (section == "network" && showLogs) {
             LogsPanel(logs = logs)
         }
+            }
+        }
+    }
+    }
+    }
     }
 }
 
@@ -6002,7 +6349,7 @@ private fun AboutLinksCard() {
                 verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
                 Text("About LanDrop", fontWeight = FontWeight.Bold, fontSize = 20.sp)
-                Text("Version $appVersion", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
+                Text("Version v$appVersion", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
             }
             SettingsLinkRow(
                 icon = {
@@ -6015,6 +6362,7 @@ private fun AboutLinksCard() {
                 },
                 title = "Source code",
                 supporting = "View on GitHub",
+                external = true,
                 onClick = { openLink(context.getString(R.string.source_code_url)) }
             )
             SettingsDivider()
@@ -6024,6 +6372,7 @@ private fun AboutLinksCard() {
                 },
                 title = "Windows version",
                 supporting = "Installers and portable download",
+                external = true,
                 onClick = { openLink(context.getString(R.string.windows_download_url)) }
             )
         }
@@ -6035,7 +6384,8 @@ private fun SettingsLinkRow(
     icon: @Composable () -> Unit,
     title: String,
     supporting: String,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    external: Boolean = false
 ) {
     Surface(onClick = onClick, modifier = Modifier.fillMaxWidth(), color = Color.Transparent) {
         Row(
@@ -6049,7 +6399,7 @@ private fun SettingsLinkRow(
                 Text(supporting, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
             }
             Icon(
-                Icons.AutoMirrored.Rounded.OpenInNew,
+                if (external) Icons.AutoMirrored.Rounded.OpenInNew else Icons.AutoMirrored.Rounded.ArrowForward,
                 contentDescription = null,
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.size(20.dp)
@@ -6088,25 +6438,33 @@ private fun LanguageControl(
     language: AppLanguage,
     onLanguageChange: (AppLanguage) -> Unit
 ) {
-    val options = listOf(
-        AppLanguage.English to "English",
-        AppLanguage.Dari to "دری"
-    )
-    // Recreate Material outlines when direction changes; cached paths can retain the old ends.
-    key(LocalLayoutDirection.current) {
-        SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-            options.forEachIndexed { index, option ->
-                SegmentedButton(
-                    selected = language == option.first,
-                    onClick = { onLanguageChange(option.first) },
-                    shape = SegmentedButtonDefaults.itemShape(
-                        index = index,
-                        count = options.size
-                    ),
-                    label = { Text(option.second, maxLines = 1, overflow = TextOverflow.Ellipsis) }
-                )
-            }
-        }
+    var expanded by remember { mutableStateOf(false) }
+    OutlinedButton(onClick = { expanded = true }, modifier = Modifier.fillMaxWidth()) {
+        MaterialText(language.nativeLabel)
+    }
+    if (expanded) {
+        AlertDialog(
+            onDismissRequest = { expanded = false },
+            title = { Text("Language") },
+            text = {
+                Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                    AppLanguage.entries.forEach { option ->
+                        Surface(
+                            onClick = { onLanguageChange(option); expanded = false },
+                            color = Color.Transparent,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(modifier = Modifier.padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                androidx.compose.material3.RadioButton(selected = language == option, onClick = null)
+                                Spacer(Modifier.width(12.dp))
+                                MaterialText(option.nativeLabel)
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { expanded = false }) { Text("Close") } }
+        )
     }
 }
 
@@ -6213,9 +6571,12 @@ private fun LogsPanel(logs: List<String>) {
                     fontSize = 13.sp
                 )
             } else {
+                val translations = LocalAppTranslations.current
                 logs.take(80).forEach { line ->
+                    val separator = line.indexOf("  ")
+                    val translated = if (separator == 8) line.take(10) + translations.translate(line.drop(10)) else line
                     Text(
-                        line,
+                        translated,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         fontSize = 12.sp
                     )

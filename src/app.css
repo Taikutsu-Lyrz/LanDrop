@@ -1757,3 +1757,32 @@ html[data-theme="light"] .app-shell.mobile-shell .sidebar-nav {
     right: 12px;
   }
 }
+
+.settings-navigation { display: grid; gap: 2px; border-radius: 24px; overflow: hidden; }
+.settings-category { display: flex; align-items: center; justify-content: space-between; gap: 16px; width: 100%; padding: 18px 22px; text-align: start; border: 0; background: var(--panel); color: inherit; cursor: pointer; }
+.settings-category:hover { background: var(--panel-raised); }
+.settings-category:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; }
+.settings-category strong { display: block; margin-bottom: 4px; }
+.settings-chevron { font-size: 28px; }
+[dir="rtl"] .settings-chevron { transform: scaleX(-1); }
+.settings-back { margin-bottom: 12px; }
+
+.settings-preferences { display: grid; gap: 12px; margin-block: 20px; }
+.settings-preference-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding-block: 12px; border-bottom: 1px solid var(--border); }
+.settings-preference-row label { display: flex; align-items: center; gap: 12px; cursor: pointer; }
+.settings-preference-row input { accent-color: var(--accent); width: 20px; height: 20px; }
+
+.settings-page-stack { display: grid; align-items: start; overflow-x: clip; }
+.settings-page { grid-area: 1 / 1; min-width: 0; }
+.settings-category-icon { display: grid; place-items: center; color: var(--accent); flex-shrink: 0; }
+.settings-category-label { flex: 1; min-width: 0; }
+
+.settings-drag-handle { cursor: grab; touch-action: none; font-size: 24px; }
+.settings-drag-handle:active { cursor: grabbing; }
+.settings-dragging { background: var(--active-soft); border-radius: 12px; }
+
+.settings-preference-row { transition: background-color 180ms ease, box-shadow 180ms ease; }
+.settings-preference-row.settings-dragging { box-shadow: var(--shadow); outline: 1px solid var(--border-strong); }
+@media (prefers-reduced-motion: reduce) { .settings-preference-row { transition: none; } }
+
+.settings-group-label { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }

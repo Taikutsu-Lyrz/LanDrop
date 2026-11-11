@@ -1,50 +1,40 @@
 import dariLocale from "../../locales/prs-AF.json";
+import japaneseLocale from "../../locales/ja.json";
+import spanishLocale from "../../locales/es.json";
+import portugueseLocale from "../../locales/pt.json";
+import turkishLocale from "../../locales/tr.json";
 
-export type AppLanguage = "en" | "prs-AF";
+export type AppLanguage = "en" | "prs-AF" | "ja" | "es" | "tr" | "pt";
+export const supportedLanguages: {code: AppLanguage; label: string}[] = [
+  {code: "en", label: "English"}, {code: "prs-AF", label: "دری"},
+  {code: "ja", label: "日本語"}, {code: "es", label: "Español"}, {code: "tr", label: "Türkçe"}, {code: "pt", label: "Português"}
+];
 
 const STORAGE_KEY = "landrop.language";
 const TRANSLATABLE_ATTRIBUTES = ["placeholder", "title", "aria-label", "alt"] as const;
 
 type LocaleSection = Record<string, string>;
 
-const phraseMap = new Map<string, string>([
-  ...Object.entries(dariLocale.shared as LocaleSection),
-  ...Object.entries(dariLocale.desktop as LocaleSection)
-]);
-
-type TemplateTranslation = {
-  source: string;
-  target: string;
-  regex: RegExp;
-};
-
-function escapeRegex(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function templateRegex(source: string): RegExp {
-  const placeholder = /\$\{[^}]+\}/g;
-  let pattern = "^";
-  let last = 0;
-  for (const match of source.matchAll(placeholder)) {
-    const index = match.index ?? 0;
-    pattern += escapeRegex(source.slice(last, index));
-    pattern += "(.*?)";
-    last = index + match[0].length;
+type TemplateTranslation = { regex: RegExp; target: string; tokens: string[] };
+const placeholder = /\$\{[^}]+\}|\$[A-Za-z_]\w*/g;
+function escapeRegex(value: string): string { return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
+const localeMaps = new Map<AppLanguage, {phrases: Map<string, string>; templates: TemplateTranslation[]}>();
+for (const [language, locale] of [["prs-AF", dariLocale], ["ja", japaneseLocale], ["es", spanishLocale], ["tr", turkishLocale], ["pt", portugueseLocale]] as const) {
+  const phrases = new Map<string, string>([...Object.entries(locale.shared as LocaleSection), ...Object.entries(locale.desktop as LocaleSection)]);
+  const templates: TemplateTranslation[] = [];
+  for (const [source, target] of phrases) {
+    const tokens: string[] = [];
+    let pattern = "^", last = 0;
+    for (const match of source.matchAll(placeholder)) {
+      pattern += escapeRegex(source.slice(last, match.index)) + "(.*?)";
+      tokens.push(match[0]);
+      last = match.index! + match[0].length;
+    }
+    if (tokens.length) templates.push({regex: new RegExp(pattern + escapeRegex(source.slice(last)) + "$", "s"), target, tokens});
   }
-  pattern += escapeRegex(source.slice(last));
-  pattern += "$";
-  return new RegExp(pattern, "s");
+  templates.sort((left, right) => right.regex.source.length - left.regex.source.length);
+  localeMaps.set(language, {phrases, templates});
 }
-
-const templateTranslations: TemplateTranslation[] = [...phraseMap.entries()]
-  .filter(([source]) => source.includes("${"))
-  .map(([source, target]) => ({
-    source,
-    target,
-    regex: templateRegex(source)
-  }))
-  .sort((a, b) => b.source.length - a.source.length);
 
 let currentLanguage: AppLanguage = "en";
 let observer: MutationObserver | null = null;
@@ -53,25 +43,23 @@ const renderedText = new WeakMap<Text, string>();
 const originalAttributes = new WeakMap<Element, Map<string, string>>();
 const renderedAttributes = new WeakMap<Element, Map<string, string>>();
 
-function substituteTemplate(target: string, captures: string[]): string {
-  let index = 0;
-  return target.replace(/\$\{[^}]+\}/g, () => captures[index++] ?? "");
-}
+const nestedMessageTokens = new Set(["${result.message}"]);
 
-function translateCore(source: string): string {
-  const direct = phraseMap.get(source);
-  if (direct !== undefined) {
-    return direct;
-  }
-
-  for (const template of templateTranslations) {
+function translateCore(source: string, language: AppLanguage, depth = 0): string {
+  const locale = localeMaps.get(language);
+  if (!locale) return source;
+  const direct = locale.phrases.get(source);
+  if (direct !== undefined) return direct;
+  if (depth >= 2) return source;
+  for (const template of locale.templates) {
     const match = template.regex.exec(source);
-    if (!match) {
-      continue;
-    }
-    return substituteTemplate(template.target, match.slice(1));
+    if (match) return template.target.replace(placeholder, (token) => {
+      const index = template.tokens.indexOf(token);
+      if (index < 0) return token;
+      const value = match[index + 1];
+      return nestedMessageTokens.has(token) && value !== source ? translateCore(value, language, depth + 1) : value;
+    });
   }
-
   return source;
 }
 
@@ -89,10 +77,11 @@ export function translateText(value: string, language: AppLanguage = currentLang
     return value;
   }
 
-  return leading + translateCore(core) + trailing;
+  return leading + translateCore(core, language) + trailing;
 }
 
 function renderTextNode(node: Text, force = false) {
+  if (node.parentElement?.closest("[data-i18n-skip], script, style")) return;
   const lastRendered = renderedText.get(node);
 
   if (!force && lastRendered !== undefined && node.data === lastRendered) {
@@ -189,7 +178,7 @@ function renderTree(root: Node, force = false) {
 
 function applyDocumentMetadata() {
   const isDari = currentLanguage === "prs-AF";
-  document.documentElement.lang = isDari ? "prs-AF" : "en";
+  document.documentElement.lang = currentLanguage;
   document.documentElement.dir = isDari ? "rtl" : "ltr";
   document.documentElement.dataset.language = currentLanguage;
 }
@@ -205,13 +194,16 @@ export function getInitialLanguage(): AppLanguage {
   if (typeof window === "undefined") {
     return "en";
   }
-  return window.localStorage.getItem(STORAGE_KEY) === "prs-AF" ? "prs-AF" : "en";
+  try {
+    const saved = window.localStorage.getItem(STORAGE_KEY);
+    return supportedLanguages.find((language) => language.code === saved)?.code ?? "en";
+  } catch { return "en"; }
 }
 
 export function setAppLanguage(language: AppLanguage) {
   currentLanguage = language;
   if (typeof window !== "undefined") {
-    window.localStorage.setItem(STORAGE_KEY, language);
+    try { window.localStorage.setItem(STORAGE_KEY, language); } catch { /* Session language still works. */ }
   }
   if (typeof document !== "undefined") {
     renderDocument(true);

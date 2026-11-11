@@ -5,9 +5,13 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.compositionLocalOf
 import org.json.JSONObject
 
-internal enum class AppLanguage {
-    English,
-    Dari
+internal enum class AppLanguage(val nativeLabel: String, val localeTag: String, val rtl: Boolean = false) {
+    English("English", "en"),
+    Dari("دری", "prs-AF", true),
+    Japanese("日本語", "ja"),
+    Spanish("Español", "es"),
+    Turkish("Türkçe", "tr"),
+    Portuguese("Português", "pt")
 }
 
 internal val LocalAppLanguage = compositionLocalOf { AppLanguage.English }
@@ -17,15 +21,29 @@ internal class AppTranslations private constructor(
     private val exact: Map<String, String>,
     private val templates: List<TemplateTranslation>
 ) {
-    fun translate(text: String): String {
+    fun translate(text: String): String = translate(text, depth = 0)
+
+    private fun translate(text: String, depth: Int): String {
         exact[text]?.let { return it }
+        if (depth >= 3) return text
         templates.forEach { template ->
-            template.translate(text)?.let { return it }
+            template.translate(text) { token, value ->
+                // Translate app-generated labels inside messages, while leaving
+                // names, addresses, paths and other interpolated data alone.
+                if (token in localizedMessageTokens && value != text) translate(value, depth + 1)
+                else value
+            }?.let { return it }
         }
         return text
     }
 
     companion object {
+        private val localizedMessageTokens = setOf(
+            "\${connectFailure(reason)}", "\${discoveryFailure(reason)}",
+            "\${peer.statusLabel}", "\${peer.linkLabel}", "\$link",
+            "\${NetworkDetails.localIpv4Summary()}",
+            "\${result.message}", "\$message", "\${error.message}", "\$detail"
+        )
         val Empty = AppTranslations(emptyMap(), emptyList())
 
         fun fromJson(root: JSONObject): AppTranslations {
@@ -48,26 +66,28 @@ internal class AppTranslations private constructor(
                     exact[source] = target
                 }
             }
-            return AppTranslations(exact, templates)
+            return AppTranslations(exact, templates.sortedByDescending { it.literalLength })
         }
     }
 }
 
-internal fun loadDariTranslations(context: Context): AppTranslations {
-    return runCatching {
-        val raw = context.resources.openRawResource(R.raw.prs_af)
-            .bufferedReader()
-            .use { it.readText() }
-        AppTranslations.fromJson(JSONObject(raw))
-    }.getOrDefault(AppTranslations.Empty)
+internal fun loadAppTranslations(context: Context, language: AppLanguage): AppTranslations {
+    val resource = when (language) {
+        AppLanguage.English -> return AppTranslations.Empty
+        AppLanguage.Dari -> R.raw.prs_af
+        AppLanguage.Japanese -> R.raw.ja
+        AppLanguage.Spanish -> R.raw.es
+        AppLanguage.Turkish -> R.raw.tr
+        AppLanguage.Portuguese -> R.raw.pt
+    }
+    val raw = context.resources.openRawResource(resource).bufferedReader().use { it.readText() }
+    return AppTranslations.fromJson(JSONObject(raw))
 }
 
 @Composable
 internal fun localizeAppText(text: String): String {
-    return when (LocalAppLanguage.current) {
-        AppLanguage.English -> text
-        AppLanguage.Dari -> LocalAppTranslations.current.translate(text)
-    }
+    return if (LocalAppLanguage.current == AppLanguage.English) text
+    else LocalAppTranslations.current.translate(text)
 }
 
 private data class TemplatePart(
@@ -78,9 +98,10 @@ private data class TemplatePart(
 private data class TemplateTranslation(
     val regex: Regex,
     val targetParts: List<TemplatePart>,
-    val tokenGroups: Map<String, Int>
+    val tokenGroups: Map<String, Int>,
+    val literalLength: Int
 ) {
-    fun translate(text: String): String? {
+    fun translate(text: String, localizeValue: (String, String) -> String): String? {
         val match = regex.matchEntire(text) ?: return null
         return buildString {
             targetParts.forEach { part ->
@@ -89,7 +110,7 @@ private data class TemplateTranslation(
                     part.token != null -> {
                         val group = tokenGroups[part.token]
                         if (group != null && group < match.groupValues.size) {
-                            append(match.groupValues[group])
+                            append(localizeValue(part.token, match.groupValues[group]))
                         } else {
                             append(part.token)
                         }
@@ -103,6 +124,8 @@ private data class TemplateTranslation(
 private fun buildTemplateTranslation(source: String, target: String): TemplateTranslation? {
     val sourceParts = parseTemplate(source)
     if (sourceParts.none { it.token != null }) return null
+    val literalLength = sourceParts.sumOf { it.literal?.length ?: 0 }
+    if (literalLength == 0) return null
 
     val tokenGroups = linkedMapOf<String, Int>()
     var nextGroup = 1
@@ -125,9 +148,10 @@ private fun buildTemplateTranslation(source: String, target: String): TemplateTr
 
     return runCatching {
         TemplateTranslation(
-            regex = Regex(pattern),
+            regex = Regex(pattern, RegexOption.DOT_MATCHES_ALL),
             targetParts = parseTemplate(target),
-            tokenGroups = tokenGroups
+            tokenGroups = tokenGroups,
+            literalLength = literalLength
         )
     }.getOrNull()
 }

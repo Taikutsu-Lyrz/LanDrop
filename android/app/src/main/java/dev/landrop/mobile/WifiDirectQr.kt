@@ -129,7 +129,7 @@ fun WifiDirectQrCode(
     val bitmap = remember(payload) { renderQrCode(payload, 720) }
     Image(
         bitmap = bitmap.asImageBitmap(),
-        contentDescription = "Wi-Fi Direct pairing QR code",
+        contentDescription = localizeAppText("Wi-Fi Direct pairing QR code"),
         modifier = modifier,
         contentScale = ContentScale.Fit
     )

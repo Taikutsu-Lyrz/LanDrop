@@ -12,8 +12,8 @@ android {
         minSdk = 26
         targetSdk = 36
         // Play updates require a new build code; local builds retain the current code by default.
-        versionCode = providers.gradleProperty("landropVersionCode").getOrElse("104").toInt()
-        versionName = "0.1.0"
+        versionCode = providers.gradleProperty("landropVersionCode").getOrElse("106").toInt()
+        versionName = "0.2.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 

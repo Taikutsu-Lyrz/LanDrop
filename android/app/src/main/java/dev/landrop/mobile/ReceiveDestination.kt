@@ -8,6 +8,7 @@ import android.content.pm.PackageManager
 import android.provider.DocumentsContract
 
 internal fun receiveFolderProblem(context: Context, treeUri: Uri?): String? {
+    if (treeUri?.toString() == DOWNLOADS_DESTINATION) return if (android.os.Build.VERSION.SDK_INT >= 29) null else "Choose a save folder before receiving."
     if (treeUri == null) return "Choose a save folder before receiving."
     return runCatching {
         if (context.checkUriPermission(

@@ -7,7 +7,10 @@
 </svelte:head>
 
 <script lang="ts">
+  import { fly } from "svelte/transition";
+  import { flip } from "svelte/animate";
   import { onMount } from "svelte";
+  import { invoke } from "@tauri-apps/api/core";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import QRCode from "qrcode";
   import DeviceList from "./lib/components/DeviceList.svelte";
@@ -82,9 +85,129 @@
     getInitialLanguage,
     initializeI18n,
     setAppLanguage,
+    translateText,
+    supportedLanguages,
     type AppLanguage
   } from "./lib/i18n";
 
+  type SettingsPage = "home" | "appearance" | "remote" | "network" | "trusted" | "performance" | "device" | "preferences" | "wifi" | "shortcuts";
+  let settingsPage: SettingsPage = "home";
+  const settingsPages: {id: SettingsPage; title: string; description: string}[] = [
+    {id: "appearance", title: "Theme and language", description: "Personalize LanDrop"},
+    {id: "remote", title: "Remote file sharing", description: "Connect to a remote computer"},
+    {id: "wifi", title: "Wi-Fi Direct", description: "Direct connection without a router"},
+    {id: "network", title: "Network and connections", description: "Active path, Wi-Fi Direct, and logs"},
+    {id: "trusted", title: "Trusted devices", description: "Manage known devices"},
+    {id: "performance", title: "Transfer performance", description: "Parallel file transfers"},
+    {id: "shortcuts", title: "More settings", description: "Subpage shortcuts"},
+    {id: "preferences", title: "Preferences", description: "Customize your Settings page"}
+  ];
+  const reorderablePages = settingsPages.filter((page) => page.id !== "preferences");
+  const pinnablePages = reorderablePages.filter((page) => page.id !== "shortcuts");
+  function loadPinnedSettings(): SettingsPage[] {
+    try {
+      const saved: unknown = JSON.parse(localStorage.getItem("landrop.settings.pinned") ?? "[]");
+      return Array.isArray(saved) ? [...new Set(saved.filter((id): id is SettingsPage => pinnablePages.some((page) => page.id === id)))] : [];
+    } catch { return []; }
+  }
+  let pinnedSettings = loadPinnedSettings();
+  function loadSettingsOrder(): SettingsPage[] {
+    let saved: SettingsPage[] = pinnedSettings;
+    try {
+      const stored: unknown = JSON.parse(localStorage.getItem("landrop.settings.order") ?? "null");
+      if (Array.isArray(stored)) saved = stored.filter((id): id is SettingsPage => reorderablePages.some((page) => page.id === id));
+    } catch { /* Use the existing pin order when no valid layout has been saved. */ }
+    return [...new Set([...saved, ...reorderablePages.map((page) => page.id)])];
+  }
+  let settingsOrder = loadSettingsOrder();
+  $: settingsNavigation = [...settingsOrder.filter((id) => !pinnedSettings.includes(id) && id !== "shortcuts"), "preferences" as SettingsPage]
+    .map((id) => settingsPages.find((page) => page.id === id)!);
+  function saveSettingsOrder(next: SettingsPage[]) {
+    settingsOrder = next;
+    try { localStorage.setItem("landrop.settings.order", JSON.stringify(next)); layoutSaveError = false; }
+    catch { layoutSaveError = true; }
+  }
+  function resetSettingsLayout() {
+    savePinnedSettings([]);
+    saveSettingsOrder(reorderablePages.map((page) => page.id));
+  }
+  let layoutSaveError = false;
+  function savePinnedSettings(next: SettingsPage[]) {
+    pinnedSettings = next;
+    try { localStorage.setItem("landrop.settings.pinned", JSON.stringify(next)); layoutSaveError = false; }
+    catch { layoutSaveError = true; }
+  }
+  let draggedSetting: SettingsPage | null = null;
+  function dropSetting(target: SettingsPage, finish = true) {
+    const next = [...settingsOrder];
+    const from = draggedSetting === null ? -1 : next.indexOf(draggedSetting);
+    const to = next.indexOf(target);
+    if (from >= 0 && to >= 0 && from !== to) {
+      const [item] = next.splice(from, 1);
+      next.splice(to, 0, item);
+      saveSettingsOrder(next);
+    }
+    if (finish) draggedSetting = null;
+  }
+  function movePinnedSettings(id: SettingsPage, delta: number) {
+    const next = [...settingsOrder];
+    const index = next.indexOf(id);
+    const target = index + delta;
+    if (index < 0 || target < 0 || target >= next.length) return;
+    next.splice(index, 1);
+    next.splice(target, 0, id);
+    saveSettingsOrder(next);
+  }
+  function showSettingsSection(page: SettingsPage) {
+    return settingsPage === page || (settingsPage === "home" && pinnedSettings.includes(page));
+  }
+  function settingsSectionOrder(page: SettingsPage) {
+    return settingsPage === "home" ? 10 + settingsOrder.filter((id) => pinnedSettings.includes(id) || id === "shortcuts").indexOf(page) : 0;
+  }
+  function settingsIcon(id: SettingsPage): "sliders" | "globe" | "wifi" | "network" | "shield" | "adapter" | "settings" {
+    switch (id) {
+      case "appearance": return "sliders";
+      case "remote": return "globe";
+      case "wifi": return "wifi";
+      case "network": return "network";
+      case "trusted": return "shield";
+      case "performance": return "adapter";
+      default: return "settings";
+    }
+  }
+  type DirectWifiSummary = {state: string; ssid: string | null};
+  let directWifiHost: DirectWifiSummary | null = null;
+  async function refreshDirectWifiSummary() {
+    if (!canConfigureFirewall) return;
+    try { directWifiHost = await invoke<DirectWifiSummary>("direct_wifi", {action: "status"}); }
+    catch { directWifiHost = null; }
+  }
+  function settingsDetails(id: SettingsPage, settings: AppSettings | null, appLanguage: AppLanguage, remoteAccessStatus: RemoteAccessStatus, localAdapters: LocalAdapter[], directWifiHost: DirectWifiSummary | null): string {
+    switch (id) {
+      case "appearance": {
+        const theme = {system: "System", light: "Light", dark: "Dark", oled: "OLED"}[settings?.theme ?? "system"];
+        return `${translateText(theme, appLanguage)} • ${supportedLanguages.find((language) => language.code === appLanguage)?.label}`;
+      }
+      case "remote": return remoteAccessStatus.message;
+      case "wifi": {
+        const state = directWifiHost?.state;
+        const label = state === "started" ? "On" : state === "starting" ? "Starting…" : state === "stopped" ? "Off" : "Not available";
+        return directWifiHost?.ssid ? `${translateText(label, appLanguage)} • ${directWifiHost.ssid}` : label;
+      }
+      case "network": return localAdapters.filter((adapter) => adapter.status === "active").map((adapter) => adapter.friendlyName).join(", ") || "No active network";
+      case "trusted": return `Trusted devices: ${settings?.trustedDeviceIds.length ?? 0}`;
+      case "performance": return `Concurrent files: ${settings?.concurrentFileStreams ?? 1}`;
+      default: return "Customize your Settings page";
+    }
+  }
+  let settingsTravel = 24;
+  const reducedSettingsMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+  function openSettingsPage(page: SettingsPage) {
+    const direction = document.documentElement.dir === "rtl" ? -1 : 1;
+    settingsTravel = (page === "home" ? -24 : 24) * direction;
+    settingsPage = page;
+    document.querySelector("main")?.scrollTo({top: 0});
+  }
   type ViewMode = "receive" | "send" | "settings";
 
   let bootstrap: AppBootstrap | null = null;
@@ -126,7 +249,7 @@
   let directLanBusyAdapterId: string | null = null;
   let diagnosticsBusy = false;
   let diagnosticsReport = "";
-  let statusLine = "Starting LanDrop.";
+  let statusLine: string | string[] = "Starting LanDrop.";
   let platformCapabilities: PlatformCapabilities | null = null;
   let appLanguage: AppLanguage = getInitialLanguage();
 
@@ -154,8 +277,10 @@
     const stopI18n = initializeI18n(appLanguage);
 
     void initialize().then(() => {
+      void refreshDirectWifiSummary();
       void handleRefreshDiscovery();
       refreshTimer = window.setInterval(() => {
+        void refreshDirectWifiSummary();
         void handleRefreshDiscovery();
       }, 8000);
     });
@@ -183,7 +308,7 @@
         if (currentView === "send") {
           statusLine =
             nextDevices.length > 0
-              ? `${nextDevices.length} nearby device${nextDevices.length === 1 ? "" : "s"} found.`
+              ? `Nearby devices: ${nextDevices.length}`
               : "Looking for nearby devices.";
         }
       }),
@@ -307,8 +432,8 @@
           firewallBusy = true;
           const firewallResult = await ensureFirewallRules();
           firewallMessage = firewallResult.success
-            ? " Firewall access is ready."
-            : ` ${firewallResult.message}`;
+            ? "Firewall access is ready."
+            : firewallResult.message;
           firewallBusy = false;
         }
         if (remoteAccessStatus.state === "mapped" && remotePublicHost.trim()) {
@@ -320,10 +445,8 @@
             // User can enter a public address and create the invite manually.
           }
         }
-        statusLine = `${remoteAccessStatus.message}${firewallMessage}`;
-        if (!settings.receiveEnabled) {
-          statusLine = `${statusLine} Turn on Receive to accept remote files.`;
-        }
+        statusLine = [remoteAccessStatus.message, firewallMessage,
+          settings.receiveEnabled ? "" : "Turn on Receive to accept remote files."].filter(Boolean);
       } else {
         remoteInvite = "";
         remoteInviteQr = "";
@@ -709,9 +832,7 @@
   function handleLanguageChange(language: AppLanguage) {
     appLanguage = language;
     setAppLanguage(language);
-    statusLine = language === "prs-AF"
-      ? "زبان LanDrop به دری تغییر کرد."
-      : "LanDrop language changed to English.";
+    statusLine = "Language updated.";
   }
 
   async function handleThemeChange(theme: AppSettings["theme"]) {
@@ -1273,7 +1394,11 @@
         {receiveEnabled ? "Receive on" : "Receive paused"}
       </span>
       <div class="sidebar-device">{settings?.deviceName ?? "This PC"}</div>
-      <p class="sidebar-status">{statusLine}</p>
+      <p class="sidebar-status">
+        {#each (typeof statusLine === "string" ? [statusLine] : statusLine) as message, index}
+          {index > 0 ? " " : ""}<span>{message}</span>
+        {/each}
+      </p>
     </div>
   </aside>
 
@@ -1604,15 +1729,21 @@
         </section>
       </section>
     {:else}
-      <section class="view-shell">
+      <div class="settings-page-stack">
+      {#key settingsPage}
+      <section class="view-shell settings-page" in:fly={{x: settingsTravel, duration: reducedSettingsMotion.matches ? 0 : 220}} out:fly={{x: -settingsTravel, duration: reducedSettingsMotion.matches ? 0 : 150}}>
         <header class="view-header">
           <div>
-            <h1>Settings</h1>
-            <p>Device name, receive protection, remote file sharing, and network details.</p>
+            {#if settingsPage !== "home"}
+              <button class="soft-button settings-back" on:click={() => openSettingsPage("home")}>Back to Settings</button>
+            {/if}
+            <h1>{settingsPages.find((page) => page.id === settingsPage)?.title ?? "Settings"}</h1>
+            {#if settingsPage === "home"}<p>Receive and pairing preferences.</p>{/if}
           </div>
         </header>
 
         <section class="settings-grid">
+          {#if settingsPage === "home"}
           <section class="content-card">
             <div class="section-header">
               <div class="section-icon"><Icon name="device" /></div>
@@ -1674,8 +1805,10 @@
               </button>
             </div>
           </section>
+          {/if}
 
-          <section class="content-card">
+          {#if showSettingsSection("appearance")}
+          <section style:order={settingsSectionOrder("appearance")} class="content-card">
             <div class="section-header">
               <div class="section-icon"><Icon name="sliders" /></div>
               <div>
@@ -1714,8 +1847,10 @@
               </button>
             </div>
           </section>
+          {/if}
 
-          <section class="content-card">
+          {#if showSettingsSection("appearance")}
+          <section style:order={settingsSectionOrder("appearance")} class="content-card">
             <div class="section-header">
               <div class="section-icon"><Icon name="sliders" /></div>
               <div>
@@ -1723,25 +1858,19 @@
                 <p>Choose the language used by LanDrop.</p>
               </div>
             </div>
-            <div class="segment-control language-control">
-              <button
-                class:active={appLanguage === "en"}
-                class="segment-button"
-                on:click={() => handleLanguageChange("en")}
-              >
-                English
-              </button>
-              <button
-                class:active={appLanguage === "prs-AF"}
-                class="segment-button"
-                on:click={() => handleLanguageChange("prs-AF")}
-              >
-                دری
-              </button>
-            </div>
+            <label class="field-block">
+              <span>Language</span>
+              <select class="text-input" value={appLanguage} on:change={(event) => handleLanguageChange(event.currentTarget.value as AppLanguage)}>
+                {#each supportedLanguages as language}
+                  <option data-i18n-skip lang={language.code} value={language.code}>{language.label}</option>
+                {/each}
+              </select>
+            </label>
           </section>
+          {/if}
 
-          <section class="content-card">
+          {#if showSettingsSection("performance")}
+          <section style:order={settingsSectionOrder("performance")} class="content-card">
             <div class="section-header">
               <div class="section-icon"><Icon name="sliders" /></div>
               <div>
@@ -1786,8 +1915,10 @@
               Higher values help folders with thousands of small files, but very high values can hurt older disks or busy antivirus scans.
             </p>
           </section>
+          {/if}
 
-          <section class="content-card">
+          {#if settingsPage === "home"}
+          <section class="content-card" style:order={1}>
             <div class="section-header">
               <div class="section-icon"><Icon name="shield" /></div>
               <div>
@@ -1843,8 +1974,10 @@
               </button>
             </div>
           </section>
+          {/if}
 
-          <section class="content-card">
+          {#if showSettingsSection("trusted")}
+          <section style:order={settingsSectionOrder("trusted")} class="content-card">
             <div class="section-header">
               <div class="section-icon"><Icon name="device" /></div>
               <div>
@@ -1882,8 +2015,10 @@
               </div>
             {/if}
           </section>
+          {/if}
 
-          <section class="content-card">
+          {#if settingsPage === "home"}
+          <section style:order={2} class="content-card">
             <div class="section-header">
               <div class="section-icon"><Icon name="folder" /></div>
               <div>
@@ -1910,8 +2045,10 @@
               {/if}
             </div>
           </section>
+          {/if}
 
-          <section class="content-card">
+          {#if showSettingsSection("network")}
+          <section style:order={settingsSectionOrder("network")} class="content-card">
             <div class="section-header">
               <div class="section-icon"><Icon name="plus" /></div>
               <div>
@@ -1947,9 +2084,11 @@
               </button>
             </div>
           </section>
+          {/if}
 
           {#if canConfigureFirewall}
-            <section class="content-card">
+            {#if showSettingsSection("network")}
+            <section style:order={settingsSectionOrder("network")} class="content-card">
               <div class="section-header">
                 <div class="section-icon"><Icon name="shield" /></div>
                 <div>
@@ -1986,9 +2125,11 @@
                 </button>
               </div>
             </section>
+            {/if}
           {/if}
 
-          <section class="content-card">
+          {#if showSettingsSection("remote")}
+          <section style:order={settingsSectionOrder("remote")} class="content-card">
             <div class="section-header">
               <div class="section-icon"><Icon name="globe" /></div>
               <div>
@@ -2153,8 +2294,10 @@
               </p>
             {/if}
           </section>
+          {/if}
 
-          <section class="content-card">
+          {#if showSettingsSection("remote")}
+          <section style:order={settingsSectionOrder("remote")} class="content-card">
             <div class="section-header">
               <div class="section-icon"><Icon name="globe" /></div>
               <div>
@@ -2183,8 +2326,10 @@
               </button>
             </div>
           </section>
+          {/if}
 
-          <section class="content-card settings-wide">
+          {#if showSettingsSection("network")}
+          <section style:order={settingsSectionOrder("network")} class="content-card settings-wide">
             <div class="section-header">
               <div class="section-icon"><Icon name="network" /></div>
               <div>
@@ -2253,10 +2398,12 @@
               </div>
             {/if}
           </section>
+          {/if}
 
           {#if canConfigureFirewall}
-            <DirectWifi />
-            <section class="content-card settings-wide">
+            {#if showSettingsSection("wifi")}<div class="settings-wide" style:order={settingsSectionOrder("wifi")}><DirectWifi /></div>{/if}
+            {#if showSettingsSection("network")}
+            <section style:order={settingsSectionOrder("network")} class="content-card settings-wide">
               <div class="section-header">
                 <div class="section-icon"><Icon name="network" /></div>
                 <div>
@@ -2301,9 +2448,11 @@
                 {/each}
               </div>
             </section>
+            {/if}
           {/if}
 
-          <section class="content-card settings-wide">
+          {#if showSettingsSection("network")}
+          <section style:order={settingsSectionOrder("network")} class="content-card settings-wide">
             <div class="section-header">
               <div class="section-icon"><Icon name="settings" /></div>
               <div>
@@ -2321,8 +2470,52 @@
               <div class="empty-state">Load a report when you need to inspect adapters, peers, and recent transfers.</div>
             {/if}
           </section>
+          {/if}
+          {#if settingsPage === "home"}
+            <nav style:order={settingsSectionOrder("shortcuts")} class="settings-navigation settings-wide" aria-label="Settings categories">
+              {#each settingsNavigation as page}
+                <button class="settings-category" on:click={() => openSettingsPage(page.id)}>
+                  <span class="settings-category-icon"><Icon name={settingsIcon(page.id)} /></span>
+                  <span class="settings-category-label"><strong>{page.title}</strong><span class="muted-line">{settingsDetails(page.id, settings, appLanguage, remoteAccessStatus, localAdapters, directWifiHost)}</span></span>
+                  <span class="settings-chevron" aria-hidden="true">›</span>
+                </button>
+              {/each}
+            </nav>
+          {/if}
+          {#if settingsPage === "preferences"}
+            <section class="content-card settings-wide">
+              <p>Turn on a section to show its controls on the main page instead of a shortcut. Drag any section to reorder it, or use Move up and Move down.</p>
+              <div class="settings-preferences">
+                {#each settingsOrder as id (id)}
+                  <div animate:flip={{duration: reducedSettingsMotion.matches ? 0 : 220}} class="settings-preference-row" class:settings-dragging={draggedSetting === id}
+                    on:dragover={(event) => { if (draggedSetting !== null && settingsOrder.includes(id)) { event.preventDefault(); if (event.dataTransfer) event.dataTransfer.dropEffect = "move"; if (draggedSetting !== id) dropSetting(id, false); } }}
+                    on:drop|preventDefault={() => dropSetting(id)} role="group" aria-label={reorderablePages.find((page) => page.id === id)?.title}>
+                    {#if id === "shortcuts"}
+                      <span class="settings-group-label"><Icon name="settings" /><strong>More settings</strong><span class="muted-line">Subpage shortcuts</span></span>
+                    {:else}
+                    <label><input type="checkbox" checked={pinnedSettings.includes(id)} on:change={(event) => savePinnedSettings(event.currentTarget.checked ? [...pinnedSettings, id] : pinnedSettings.filter((value) => value !== id))} />
+                      <Icon name={settingsIcon(id)} />
+                      {reorderablePages.find((page) => page.id === id)?.title}
+                    </label>
+                    {/if}
+                      <div class="inline-actions">
+                        <button class="soft-button settings-drag-handle" draggable="true" aria-label="Drag to reorder" title="Drag to reorder"
+                          on:dragstart={(event) => { draggedSetting = id; if (event.dataTransfer) { event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", id); } }}
+                          on:dragend={() => (draggedSetting = null)}><span aria-hidden="true">⠿</span></button>
+                        <button class="soft-button compact-button" disabled={settingsOrder.indexOf(id) === 0} on:click={() => movePinnedSettings(id, -1)}>Move up</button>
+                        <button class="soft-button compact-button" disabled={settingsOrder.indexOf(id) === settingsOrder.length - 1} on:click={() => movePinnedSettings(id, 1)}>Move down</button>
+                      </div>
+                  </div>
+                {/each}
+              </div>
+              <button class="soft-button" on:click={resetSettingsLayout}>Reset layout</button>
+              {#if layoutSaveError}<p role="alert">Could not save your layout. Changes will last for this session only.</p>{/if}
+            </section>
+          {/if}
         </section>
       </section>
+      {/key}
+      </div>
     {/if}
   </main>
 </div>

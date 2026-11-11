@@ -82,7 +82,7 @@
       {:else}
         <ul>
           {#each host.devices as device}
-            <li><strong>{device.name}</strong> <span role="status">· {device.status}</span></li>
+            <li><strong data-i18n-skip>{device.name}</strong> <span aria-hidden="true">·</span> <span role="status">{device.status === "connected" ? "Connected" : device.status}</span></li>
           {/each}
         </ul>
       {/if}
