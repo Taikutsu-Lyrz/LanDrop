@@ -31,6 +31,11 @@ on:
         required: false
         default: ''
         type: string
+      build_android:
+        description: 'Rebuild Android from source. Disable when attaching a Play-signed APK separately.'
+        required: false
+        default: true
+        type: boolean
   push:
     tags:
       - 'v*'
@@ -131,6 +136,21 @@ jobs:
           # builds always use the (possibly just bumped) version.
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
+      - name: Archive release source
+        env:
+          TAG: ${{ steps.resolve.outputs.tag }}
+          VERSION: ${{ steps.resolve.outputs.version }}
+        run: |
+          git archive --format=zip --prefix="LanDrop-$VERSION/" \
+            --output="$RUNNER_TEMP/LanDrop-$TAG-source.zip" HEAD
+
+      - name: Upload source artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: landrop-source-${{ steps.resolve.outputs.tag }}
+          path: ${{ runner.temp }}/LanDrop-${{ steps.resolve.outputs.tag }}-source.zip
+          if-no-files-found: error
+
       - name: Create (or reuse) draft release
         uses: softprops/action-gh-release@v2
         with:
@@ -141,7 +161,8 @@ jobs:
           draft: true
           prerelease: false
           generate_release_notes: true
-          fail_on_unmatched_files: false
+          files: ${{ runner.temp }}/LanDrop-${{ steps.resolve.outputs.tag }}-source.zip
+          fail_on_unmatched_files: true
 
   # ---------------------------------------------------------------------------
   build-windows:
@@ -282,6 +303,7 @@ jobs:
   # ---------------------------------------------------------------------------
   build-android:
     name: Build Android (APK / AAB)
+    if: github.event_name != 'workflow_dispatch' || inputs.build_android
     needs: prepare
     runs-on: ubuntu-latest
     steps:
